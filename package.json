@@ -1,0 +1,17 @@
+{
+  "name": "canvastty-plugin-assistant",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "CanvasTTY plugin: the Assistant («Помощник») — command review, launch triage and routing advice on System One models (Jev, Laya, Eikos) or a local Ollama model.",
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "typecheck": "tsc -p tsconfig.json",
+    "test": "node --experimental-strip-types --no-warnings --test tests/*.test.mjs"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "esbuild": "^0.25.0",
+    "typescript": "^5.8.0"
+  }
+}

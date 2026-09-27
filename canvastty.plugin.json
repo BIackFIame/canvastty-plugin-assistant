@@ -1,0 +1,152 @@
+{
+  "apiVersion": 2,
+  "id": "canvastty-assistant",
+  "name": "CanvasTTY Assistant",
+  "version": "0.1.0",
+  "description": "The Assistant: reviews agents' shell commands and file writes before they run (read-only allow list, a small decision model, a larger second reviewer, then you), triages the task you give a card, advises orchestrators, and can keep YOLO inside isolated environments. Runs on Jev (TypeSafe, OpenRouter, Vercel), Laya, an Eikos server or a model on your Ollama. Off until you turn it on.",
+  "description.ru": "Помощник: проверяет команды и записи файлов агентов до запуска (белый список чтения, маленькая модель решений, большая модель второго просмотра, потом вы), разбирает задачу окна, советует оркестраторам и может держать YOLO только в изолированных средах. Работает на Jev (TypeSafe, OpenRouter, Vercel), Laya, сервере Eikos или модели в вашей Ollama. Выключен, пока вы его не включите.",
+  "author": "CanvasTTY contributors",
+  "permissions": [
+    "storage",
+    "secrets",
+    "decision:provide",
+    "launch:contribute",
+    "tools:agents",
+    "sessions:events",
+    "cards:decorate"
+  ],
+  "coreFiles": [
+    {
+      "path": "README.md",
+      "bytes": 3149,
+      "sha256": "c655da2bb7ef77c16296e07dd6979ba6b899b32343c2139a75bda601c1ed5053"
+    },
+    {
+      "path": "README.ru.md",
+      "bytes": 5030,
+      "sha256": "1db6ab8406673bdbcbdd315b17a6987cb764b1b99a18dcbc69c367bcc366cabf"
+    },
+    {
+      "path": "services/assistant.mjs",
+      "bytes": 380371,
+      "sha256": "587e8f701fb2838b89ea7cea91444379508e00b022829a6850ed3f850d9e0592"
+    },
+    {
+      "path": "settings/assistant.html",
+      "bytes": 476,
+      "sha256": "f386dd195daa8e5b32ba802af13ec53cd11b32b3796f7620f1e069530f94478f"
+    },
+    {
+      "path": "settings/assistant.js",
+      "bytes": 23732,
+      "sha256": "6b64aeaf6c1f2491e397bc3dd78d62e48c491c42564e8e1cb32e8562f9a77ab1"
+    },
+    {
+      "path": "settings/assistant.css",
+      "bytes": 1089,
+      "sha256": "685bdf3b74c2bb535331e4985d1220cab16593910adb1f8cd1bce88430249c38"
+    }
+  ],
+  "services": [
+    {
+      "id": "assistant",
+      "title": "Assistant",
+      "description": "Command review, launch triage and routing advice on a System One model or a local Ollama model.",
+      "entry": "services/assistant.mjs",
+      "decide": {
+        "events": [
+          "pre-tool"
+        ],
+        "timeoutMs": 45000
+      },
+      "launch": {
+        "policy": true,
+        "fields": [
+          {
+            "key": "task",
+            "label": "Task (for review and triage)",
+            "kind": "text",
+            "default": "",
+            "maxLength": 200
+          },
+          {
+            "key": "dataClass",
+            "label": "Data class of this card",
+            "kind": "select",
+            "default": "default",
+            "options": [
+              {
+                "value": "default",
+                "label": "As in Assistant settings"
+              },
+              {
+                "value": "D0",
+                "label": "D0 public"
+              },
+              {
+                "value": "D1",
+                "label": "D1 internal"
+              },
+              {
+                "value": "D2",
+                "label": "D2 confidential"
+              },
+              {
+                "value": "D3",
+                "label": "D3 secret (stays on this computer)"
+              }
+            ]
+          }
+        ]
+      },
+      "tools": [
+        {
+          "name": "recommend",
+          "description": "Ask the Assistant how to run a task before you spawn a subagent for it: its kind and difficulty, whether it needs a worktree or a container, whether command review will be strict, whether it splits into parallel subagents, and whether the task misses information. Advice only: nothing is started.",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "task": {
+                "type": "string",
+                "description": "The task text you would give the subagent."
+              }
+            },
+            "required": [
+              "task"
+            ],
+            "additionalProperties": false
+          },
+          "roles": [
+            "orchestrator"
+          ]
+        },
+        {
+          "name": "review_status",
+          "description": "How the Assistant's command review runs now (mode, strictness, decision models) and its last decisions on your card and your subagents: what was allowed, declined or sent to the person, and why.",
+          "inputSchema": {
+            "type": "object",
+            "properties": {},
+            "additionalProperties": false
+          },
+          "roles": [
+            "orchestrator"
+          ]
+        }
+      ]
+    }
+  ],
+  "contributions": [
+    {
+      "id": "settings",
+      "kind": "canvas-app",
+      "title": "Assistant",
+      "description": "Decision models, modes, review strictness and data checks of the Assistant.",
+      "entry": "settings/assistant.html",
+      "defaultSize": {
+        "width": 760,
+        "height": 640
+      }
+    }
+  ],
+  "settingsContribution": "settings"
+}

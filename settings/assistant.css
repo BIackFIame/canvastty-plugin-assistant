@@ -1,0 +1,16 @@
+:root { color-scheme: light dark; font: 13px/1.4 system-ui, sans-serif; }
+body { margin: 0; padding: 12px 16px 40px; }
+h1 { font-size: 15px; margin: 0 0 4px; }
+h2 { font-size: 13px; margin: 16px 0 6px; }
+.muted { opacity: 0.75; }
+.row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin: 4px 0; }
+.label { min-width: 190px; }
+.check { display: block; margin: 4px 0; }
+select, input, button { font: inherit; }
+input:not([type]), input[type="password"] { padding: 3px 6px; min-width: 160px; }
+.backends, .recent { list-style: none; margin: 0 0 8px; padding: 0; display: grid; gap: 6px; }
+.backend { padding: 6px 8px; border: 1px solid color-mix(in srgb, currentColor 20%, transparent); border-radius: 6px; }
+.check-result { margin-top: 4px; font-size: 12px; }
+.add { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; margin: 6px 0; }
+.recent code { font-size: 12px; }
+.status { position: fixed; left: 0; right: 0; bottom: 0; padding: 6px 16px; min-height: 1.4em; background: Canvas; border-top: 1px solid color-mix(in srgb, currentColor 15%, transparent); }
