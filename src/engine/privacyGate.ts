@@ -87,11 +87,15 @@ export interface GatedState {
   notice?: { cap: DataClass; source: TrustSource };
 }
 
+/** Path segments that would reach an object's prototype instead of a field of the state. */
+const UNSAFE_SEGMENTS = new Set(['__proto__', 'prototype', 'constructor']);
+
 function setPath(target: Record<string, unknown>, path: string, value: unknown): void {
   const parts = path.split('.');
+  if (parts.some(part => !part || UNSAFE_SEGMENTS.has(part))) throw new Error(`Invalid assistant field name: ${path.slice(0, 80)}`);
   let node = target;
   for (const part of parts.slice(0, -1)) {
-    const next = node[part];
+    const next = Object.hasOwn(node, part) ? node[part] : undefined;
     if (!next || typeof next !== 'object' || Array.isArray(next)) node[part] = {};
     node = node[part] as Record<string, unknown>;
   }

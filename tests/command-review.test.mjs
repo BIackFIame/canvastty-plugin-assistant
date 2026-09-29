@@ -322,6 +322,19 @@ test('referenced files: bounded, inside the project, never a key file; a changed
   assert.deepEqual(entries.files.map(file => [file.path, file.kind]), [['package.json#scripts.build', 'script-entry'], ['scripts/build.sh', 'content']]);
 });
 
+test('referenced files for a hidden effect: a script that cannot be shown whole makes the set incomplete, and the person decides', async () => {
+  const signal = new AbortController().signal;
+  const base = { scripts: [], changedScripts: [], changedBuildFiles: [], buildFiles: [], npmScripts: [] };
+  writeFileSync(join(project, 'scripts', 'long.sh'), `# ${'z'.repeat(9000)}\n`);
+  const cut = await collectReferencedFiles({ root: project, facts: { ...base, scripts: ['scripts/long.sh'] }, git: null, signal, include: 'all' });
+  assert.deepEqual([cut.complete, cut.files[0].truncated], [false, true]);
+  const missing = await collectReferencedFiles({ root: project, facts: { ...base, scripts: ['scripts/gone.sh'] }, git: null, signal, include: 'all' });
+  assert.deepEqual([missing.complete, missing.files.length], [false, 0]);
+  const hiddenEngine = fakeEngine({ light: answersOf(0.99, 0.01, { effect_hidden: 0.4 }) });
+  const result = await decide(hiddenEngine, 'npm run build', { git: fakeGit(), files: async () => ({ files: [{ path: 'scripts/long.sh', kind: 'content', text: '# z', truncated: true }], complete: false }) });
+  assert.deepEqual([result.act, result.outcome, hiddenEngine.calls.verify.length], [null, 'person', 0]);
+});
+
 // ---------------------------------------------------------------------------
 // The use case on the engine (a fake engine: the real bands, rules and mapping)
 // ---------------------------------------------------------------------------

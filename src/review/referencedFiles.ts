@@ -179,16 +179,20 @@ export async function collectReferencedFiles(input: ReferencedFilesInput): Promi
     if (!file || file.truncated) complete = false;
     if (file) files.push(file);
   }
-  if (input.include === 'all' && files.length < max) {
+  // What runs but could not be shown whole (unreadable, cut, or past the file limit) leaves the set incomplete.
+  if (input.include === 'all') {
     for (const entry of npmScriptEntries(rootReal, input.facts.npmScripts)) {
-      if (files.length >= max) break;
+      if (files.length >= max) { complete = false; break; }
       const text = entry.text.slice(0, REVIEW_LIMITS.referencedFileBytes);
-      files.push({ path: `package.json#scripts.${entry.name}`, kind: 'script-entry', text, truncated: text.length < entry.text.length });
+      const truncated = text.length < entry.text.length;
+      if (truncated) complete = false;
+      files.push({ path: `package.json#scripts.${entry.name}`, kind: 'script-entry', text, truncated });
     }
     for (const rel of [...input.facts.scripts, ...input.facts.buildFiles.filter(file => /^(?:Makefile|makefile|GNUmakefile|justfile|Justfile)$/u.test(file))]) {
-      if (files.length >= max) break;
       if (files.some(file => file.path === rel)) continue;
+      if (files.length >= max) { complete = false; break; }
       const file = content(rel);
+      if (!file || file.truncated) complete = false;
       if (file) files.push(file);
     }
   }

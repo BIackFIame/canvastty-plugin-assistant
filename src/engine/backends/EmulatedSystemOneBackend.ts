@@ -224,6 +224,8 @@ export class EmulatedSystemOneBackend implements SystemOneBackend {
 
   get lastProbe(): EmulatedProbe | null { return this.probed ? structuredClone(this.probed) : null; }
   caps(): BackendCaps { return structuredClone(this.record); }
+  /** No USD price is known for an emulated backend (Ollama, a person's server): nothing to hold against the cap. */
+  costCeilingUsd(_request: S1Request): number { return 0; }
   setCaps(caps: BackendCaps): void { this.record = structuredClone(caps); }
   /** CanvasTTY's fitted temperature (§4.4); 1 resets it. */
   setFittedTemperature(temperature: number): void { this.fittedT = this.validTemperature(temperature); }
@@ -439,7 +441,7 @@ export class EmulatedSystemOneBackend implements SystemOneBackend {
     const ctx = this.context(opts, credential);
     try {
       const result = await this.run(request, opts, mode, ctx);
-      this.breaker?.success();
+      this.breaker?.success(admission);
       return result;
     } catch (error) {
       const failed = error instanceof SystemOneError ? error : new SystemOneError('transport', 'Emulated System One call failed.');

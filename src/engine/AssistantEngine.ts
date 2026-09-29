@@ -277,7 +277,9 @@ export class AssistantEngine {
         const cached = !!result;
         if (!result) {
           // 6. A budget slot, reserved synchronously before any await.
-          const reservation = this.budget.reserve({ useCase: request.useCase, cloud: target.kind !== 'local', ...(ctx.sessionId ? { sessionId: ctx.sessionId } : {}) });
+          const cloud = target.kind !== 'local';
+          const estimateUsd = cloud ? backend.costCeilingUsd({ model: backend.model, state: gated.state, questions }) : 0;
+          const reservation = this.budget.reserve({ useCase: request.useCase, cloud, estimateUsd, ...(ctx.sessionId ? { sessionId: ctx.sessionId } : {}) });
           if (!reservation) { lastReason = 'budget'; continue; }
           const local = target.kind === 'local' ? this.budget.local(ctx.signal) : null;
           if (target.kind === 'local' && !local) { reservation.release(); lastReason = 'budget'; continue; }
@@ -316,7 +318,8 @@ export class AssistantEngine {
         if (this.versions.has(entry.id) && this.versions.get(entry.id) !== result.resolvedVersion) this.cache.clear();
         this.versions.set(entry.id, result.resolvedVersion);
         if (!cached && use.cacheable && CACHE_TTL_MS[request.useCase] > 0) this.cache.set(cacheKey, { answers: result.answers, resolvedVersion: result.resolvedVersion, modelLabel: result.modelLabel }, CACHE_TTL_MS[request.useCase]);
-        return await this.decide(request, ctx, { mode, auditId, started, entry, backend, family, target: target.kind, caps, autoCapable: use.autoCapable, variant: gated.variant, setId, setHash, truncated, notice: gated.notice ?? null, result, cached, state: gated.state, record });
+        const recheck = (): void => { current(); if (this.epoch !== epoch) throw new StaleDecision('settings-changed'); };
+        return await this.decide(request, ctx, { mode, auditId, started, entry, backend, family, target: target.kind, caps, autoCapable: use.autoCapable, variant: gated.variant, setId, setHash, truncated, notice: gated.notice ?? null, result, cached, state: gated.state, record, recheck });
       }
       if (this.epoch !== epoch) throw new StaleDecision('settings-changed');
       record.fields = lastGate;
@@ -371,6 +374,8 @@ export class AssistantEngine {
     caps: BackendCaps; autoCapable: boolean; variant: AssistantVariant; setId: QuestionSetId; setHash: string; truncated: boolean;
     notice: { cap: DataClass; source: TrustSource } | null;
     result: Pick<S1Result, 'answers' | 'resolvedVersion' | 'modelLabel'> & Partial<S1Result>; cached: boolean; state: Record<string, unknown>; record: Partial<DecisionRecordInput>;
+    /** Throws when the caller no longer wants the decision or the settings changed. */
+    recheck(): void;
   }): Promise<AssistantDecision> {
     const { entry, backend, family, result } = input;
     // 10. Bands, from CanvasTTY's own numbers.
@@ -384,6 +389,8 @@ export class AssistantEngine {
     let enforce = false;
     if (input.mode === 'auto' && qualifiedOutcome) {
       await this.loadStats();
+      // Reading the log takes time: a decision cancelled or voided by a settings change meanwhile is not enforced.
+      input.recheck();
       enforce = this.stats.qualified({ useCase: request.useCase, outcome: qualifiedOutcome, family, resolvedVersion: result.resolvedVersion });
     }
     const ref: AssistantBackendRef = {

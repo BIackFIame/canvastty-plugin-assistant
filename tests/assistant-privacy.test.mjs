@@ -174,3 +174,11 @@ test('credential redaction reaches the fake in Strict, Warn and Off alike', asyn
     }
   } finally { await f.close(); }
 });
+
+test('gateFields: a field name cannot reach an object prototype', () => {
+  for (const name of ['__proto__.polluted', 'a.constructor.prototype.polluted', 'a..b']) {
+    assert.throws(() => gateFields([{ name, value: 'x', dataClass: 'D0', disclosure: 'metadata' }], 'warn', 'D2', { kind: 'local' }, false), /Invalid assistant field name/);
+  }
+  assert.equal({}.polluted, undefined);
+  assert.deepEqual(gateFields([{ name: 'a.b', value: 1, dataClass: 'D0', disclosure: 'metadata' }], 'warn', 'D2', { kind: 'local' }, false).state, { a: { b: 1 } });
+});

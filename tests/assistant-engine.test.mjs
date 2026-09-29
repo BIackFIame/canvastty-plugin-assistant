@@ -101,6 +101,33 @@ test('budget: slots are reserved before any await, so concurrent calls never ove
   assert.equal(slots.filter(Boolean).length, 5, 'one in flight and a queue of four');
 });
 
+test('budget: a cloud call holds its cost estimate against the day cap while it runs; an unknown cost counts as the estimate', () => {
+  const budget = new AssistantBudget({ limits: () => ({ perMinute: 1000, perDay: 1000, cloudUsdPerDay: 0.5 }) });
+  const first = budget.reserve({ useCase: 'task.route', cloud: true, estimateUsd: 0.3 });
+  assert.notEqual(first, null);
+  assert.equal(budget.reserve({ useCase: 'task.route', cloud: true, estimateUsd: 0.3 }), null, 'two running calls could pass the cap together');
+  first.commit(0.01);
+  const second = budget.reserve({ useCase: 'task.route', cloud: true, estimateUsd: 0.3 });
+  assert.notEqual(second, null, 'the real cost replaced the estimate');
+  second.commit(null);
+  assert.equal(budget.spent().usd, 0.31);
+  const third = budget.reserve({ useCase: 'task.route', cloud: true, estimateUsd: 0.1 });
+  third.release();
+  assert.equal(budget.spent().usd, 0.31, 'a call that sent nothing costs nothing');
+});
+
+test('budget: a call already cancelled is never queued for the local backend', async () => {
+  const budget = new AssistantBudget({ limits: () => ({ perMinute: 1000, perDay: 1000, cloudUsdPerDay: 1 }) });
+  const running = budget.local();
+  const aborted = new AbortController(); aborted.abort(new Error('gone'));
+  const late = budget.local(aborted.signal);
+  const outcome = await Promise.race([late.ready.then(() => 'ready', error => error.message), new Promise(resolve => setTimeout(() => resolve('waiting'), 100))]);
+  assert.equal(outcome, 'gone');
+  // It took no queue place: four more still fit.
+  assert.equal(Array.from({ length: 5 }, () => budget.local()).filter(Boolean).length, 4);
+  running.release();
+});
+
 test('breaker: auth stays open until the key changes; the next real call after that is the probe', async () => {
   const f = await engineWith({ keys: { 'decision-jev': 'k-bad' } });
   try {
@@ -215,6 +242,24 @@ test('Auto acts only for a qualified outcome on a tested, calibrated, pinned bac
     f.settings.modes['task.route'] = 'suggest';
     assert.equal((await engine.ask(routeRequest('Task D', 'D2', { map }), ctx())).enforce, false);
     engine.dispose();
+  } finally { await f.close(); }
+});
+
+test('Auto: a decision cancelled while the log is read for its statistics is not enforced', async () => {
+  const f = await engineWith({ assistant: { backends: [{ id: 'jev', preset: 'typesafe', enabled: true, trust: 'D2' }] } });
+  try {
+    f.settings.modes['task.route'] = 'auto';
+    let release, reached;
+    const gate = new Promise(resolve => { release = resolve; });
+    const reading = new Promise(resolve => { reached = resolve; });
+    f.engine.log.read = async () => { reached(); await gate; return []; };
+    let cancelled = false;
+    const asking = f.engine.ask(routeRequest('Task E', 'D2', { map: () => ({ outcome: 'code', qualifiedOutcome: 'auto-deny' }) }), ctx({ assertCurrent() { if (cancelled) throw new Error('stale'); } }));
+    await reading;
+    cancelled = true;
+    release();
+    const decision = await asking;
+    assert.deepEqual([decision.branch, decision.enforce, decision.fallbackReason], ['fallback', false, 'stale']);
   } finally { await f.close(); }
 });
 

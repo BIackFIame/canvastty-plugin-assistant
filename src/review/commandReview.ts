@@ -208,8 +208,9 @@ export async function askCommandReview(engine: CommandReviewEngine, input: Comma
       let extra: Array<AssistantField & { bound?: number }> = [];
       if (mustRead || hidden) {
         const files = await input.referencedFiles(mustRead && !hidden ? 'required' : 'all');
-        // What it must read but cannot (too long, unreadable, too many): nobody can see what runs.
-        if (mustRead && (!files.complete || !files.files.length)) return finish({ outcome: 'person', enforce: false, reason: 'its effect cannot be seen' }, { ...facts, unseeableEffect: true });
+        // What it must read, or reads because the effect is hidden, but cannot (too long, unreadable, too many): nobody
+        // can see what runs.
+        if (!files.complete || mustRead && !files.files.length) return finish({ outcome: 'person', enforce: false, reason: 'its effect cannot be seen' }, { ...facts, unseeableEffect: true });
         if (files.files.length) extra = [{ name: 'referenced_files', value: files.files, dataClass: input.dataClass, disclosure: 'content' }];
         smart.files = files.files.length;
       }

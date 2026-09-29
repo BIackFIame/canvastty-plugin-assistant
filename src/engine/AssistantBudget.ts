@@ -6,9 +6,13 @@ import { LOCAL_CONCURRENCY, USE_CASE_PER_MINUTE, type AssistantUseCase } from '.
  */
 
 export interface BudgetLimits { perMinute: number; perDay: number; cloudUsdPerDay: number }
-export interface BudgetRequest { useCase: AssistantUseCase; cloud: boolean; sessionId?: string }
+export interface BudgetRequest {
+  useCase: AssistantUseCase; cloud: boolean; sessionId?: string;
+  /** A cloud call's most it can cost: held against the day's cap while it runs, so parallel calls cannot overshoot. */
+  estimateUsd?: number;
+}
 export interface Reservation {
-  /** The request was sent: keep the slot, and add its cost to the day. */
+  /** The request was sent: keep the slot, and add its cost to the day (the held estimate when the cost is unknown). */
   commit(costUsd: number | null): void;
   /** Nothing was sent: give the slot back. */
   release(): void;
@@ -30,6 +34,8 @@ export class AssistantBudget {
   private day = '';
   private dayCalls = 0;
   private daySpend = 0;
+  /** Estimates of cloud calls still running today. */
+  private dayHeld = 0;
   private localActive = 0;
   private readonly localQueue: Array<() => void> = [];
 
@@ -40,7 +46,7 @@ export class AssistantBudget {
 
   private roll(at: number): void {
     const key = dayKey(at);
-    if (key !== this.day) { this.day = key; this.dayCalls = 0; this.daySpend = 0; }
+    if (key !== this.day) { this.day = key; this.dayCalls = 0; this.daySpend = 0; this.dayHeld = 0; }
     const cutoff = at - MINUTE;
     this.minute = this.minute.filter(t => t > cutoff);
     for (const [key2, list] of this.useCaseMinute) this.useCaseMinute.set(key2, list.filter(t => t > cutoff));
@@ -53,7 +59,10 @@ export class AssistantBudget {
     const limits = this.limits();
     if (this.minute.length >= limits.perMinute) return 'assistant-minute';
     if (this.dayCalls >= limits.perDay) return 'assistant-day';
-    if (request.cloud && this.daySpend >= limits.cloudUsdPerDay) return 'cloud-spend';
+    if (request.cloud) {
+      const committed = this.daySpend + this.dayHeld;
+      if (committed >= limits.cloudUsdPerDay || committed + estimate(request) > limits.cloudUsdPerDay) return 'cloud-spend';
+    }
     if ((this.useCaseMinute.get(request.useCase)?.length ?? 0) >= USE_CASE_PER_MINUTE[request.useCase]) return 'use-case-minute';
     return null;
   }
@@ -66,19 +75,24 @@ export class AssistantBudget {
     this.dayCalls++;
     const perUseCase = this.useCaseMinute.get(request.useCase) ?? [];
     perUseCase.push(at); this.useCaseMinute.set(request.useCase, perUseCase);
+    const held = request.cloud ? estimate(request) : 0;
+    this.dayHeld += held;
     const day = this.day;
     let settled = false;
+    const unhold = (): void => { if (day === this.day) this.dayHeld = Math.max(0, this.dayHeld - held); };
     return {
       commit: (costUsd) => {
         if (settled) return;
         settled = true;
-        if (request.cloud && typeof costUsd === 'number' && Number.isFinite(costUsd) && costUsd > 0 && day === this.day) {
-          this.daySpend += costUsd;
-        }
+        unhold();
+        const known = typeof costUsd === 'number' && Number.isFinite(costUsd) && costUsd >= 0;
+        const cost = known ? costUsd : held;
+        if (request.cloud && cost > 0 && day === this.day) this.daySpend += cost;
       },
       release: () => {
         if (settled) return;
         settled = true;
+        unhold();
         const drop = (list: number[] | undefined): void => { const i = list?.lastIndexOf(at) ?? -1; if (list && i >= 0) list.splice(i, 1); };
         drop(this.minute); drop(this.useCaseMinute.get(request.useCase));
         if (day !== this.day) return;
@@ -97,17 +111,28 @@ export class AssistantBudget {
       return { ready: Promise.resolve(), release: once(() => this.releaseLocal()) };
     }
     if (this.localQueue.length >= LOCAL_CONCURRENCY.queue) return null;
+    // An abort that already happened fires no event: never queue such a call.
+    if (signal?.aborted) {
+      const ready = Promise.reject(signal.reason ?? new Error('aborted'));
+      ready.catch(() => undefined);
+      return { ready, release: () => undefined };
+    }
     let admitted = false;
     let wake!: () => void;
+    let onAbort: (() => void) | null = null;
+    const unlisten = (): void => { if (onAbort) signal?.removeEventListener('abort', onAbort); onAbort = null; };
     const ready = new Promise<void>((resolve, reject) => {
-      wake = () => { admitted = true; resolve(); };
-      signal?.addEventListener('abort', () => {
+      wake = () => { admitted = true; unlisten(); resolve(); };
+      if (!signal) return;
+      onAbort = () => {
+        unlisten();
         const i = this.localQueue.indexOf(wake);
         if (i >= 0) { this.localQueue.splice(i, 1); reject(signal.reason ?? new Error('aborted')); }
-      }, { once: true });
+      };
+      signal.addEventListener('abort', onAbort, { once: true });
     });
     this.localQueue.push(wake);
-    return { ready, release: once(() => { if (admitted) this.releaseLocal(); else { const i = this.localQueue.indexOf(wake); if (i >= 0) this.localQueue.splice(i, 1); } }) };
+    return { ready, release: once(() => { unlisten(); if (admitted) this.releaseLocal(); else { const i = this.localQueue.indexOf(wake); if (i >= 0) this.localQueue.splice(i, 1); } }) };
   }
 
   private releaseLocal(): void {
@@ -117,6 +142,11 @@ export class AssistantBudget {
 
   /** For the checklist: whether the day's cloud spend or calls ran out. */
   spent(): { calls: number; usd: number } { this.roll(this.now()); return { calls: this.dayCalls, usd: this.daySpend }; }
+}
+
+function estimate(request: BudgetRequest): number {
+  const value = request.estimateUsd;
+  return typeof value === 'number' && Number.isFinite(value) && value > 0 ? value : 0;
 }
 
 function once(fn: () => void): () => void {

@@ -3,9 +3,12 @@ import {
   type BackendCaps, type JsonCaps, type S1Answer, type S1EvaluateOptions, type S1Locality, type S1Question, type S1Request, type S1Result, type SystemOneBackend
 } from '../../shared/systemOne.ts';
 import { decodeErrorBody, decodeResponse, encodeRequest, EIKOS_LETTERS, type DecodedResponse, type HttpDialect } from './dialects.ts';
-import { retriesFor, retryDelayMs, sleep } from './retry.ts';
+import { RETRY_POLICY, retriesFor, retryDelayMs, sleep } from './retry.ts';
 import { assertRequestModel, dialectLimits, FIXED_SECRET_ORIGINS, modelLabel, presetCaps, resolveEndpoint, S1_PRESETS, secretOwnerFor, type S1Preset, type S1PresetId } from './systemOneRoutes.ts';
 import type { CircuitBreaker } from './CircuitBreaker.ts';
+
+/** Tokens a request's own framing may add beyond its JSON (template, roles, schema). */
+const FRAMING_TOKENS = 4_096;
 
 export interface SystemOneHttpBackendOptions {
   id: string;
@@ -126,6 +129,17 @@ export class SystemOneHttpBackend implements SystemOneBackend {
   get modelRule(): 'typesafe' | 'any' { return this.preset === 'eikos' || this.preset === 'custom' ? 'any' : 'typesafe'; }
   get presetInfo(): S1Preset { return S1_PRESETS[this.preset]; }
   caps(): BackendCaps { return structuredClone(this.record); }
+
+  /**
+   * The most one evaluate() of `request` can cost, for the day's cloud cap: every batch resends the whole state, every
+   * try may be billed, a token is at least one byte, plus room for the request's own framing. 0 without a price.
+   */
+  costCeilingUsd(request: S1Request): number {
+    const price = this.presetInfo.priceUsdPerMillionInput;
+    if (price === null) return 0;
+    const batches = Math.max(1, Object.keys(request.questions).length);
+    return (Buffer.byteLength(JSON.stringify(request)) + FRAMING_TOKENS) * batches * (1 + RETRY_POLICY.maxRetries) * price / 1e6;
+  }
   setCaps(caps: BackendCaps): void { this.record = structuredClone(caps); }
 
   async evaluate(request: S1Request, opts: S1EvaluateOptions): Promise<S1Result> {
@@ -161,7 +175,7 @@ export class SystemOneHttpBackend implements SystemOneBackend {
     const tracker: SendTracker = { sent: 0 };
     try {
       const result = await this.run(request, batches, compiled.rewritten, plan.skipped, opts, credential, tracker);
-      this.breaker?.success();
+      this.breaker?.success(admission);
       return result;
     } catch (error) {
       const failure = error instanceof SystemOneError ? error : new SystemOneError('transport', 'System One call failed.');

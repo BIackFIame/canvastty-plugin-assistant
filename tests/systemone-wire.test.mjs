@@ -359,7 +359,7 @@ test('breaker: five failures open it for 30 s doubling to 10 min; the next real 
   assert.deepEqual(breaker.snapshot(), { state: 'open', reason: 'timeout', consecutiveFailures: 5, retryAt: 30_000, hold: 'timed' });
   assert.throws(() => breaker.acquire(), error => error.errorClass === 'breaker-open');
   now = 30_000;
-  assert.deepEqual(breaker.acquire(), { probe: true });
+  assert.equal(breaker.acquire().probe, true);
   assert.throws(() => breaker.acquire(), error => error.errorClass === 'breaker-open', 'one probe at a time');
   breaker.failure('transport');
   assert.equal(breaker.snapshot().retryAt, 30_000 + 60_000);
@@ -381,7 +381,7 @@ test('breaker: auth waits for a new key; quota, unknown model and a wrong addres
   assert.throws(() => breaker.acquire(7));
   breaker.recheck();
   assert.throws(() => breaker.acquire(7), undefined, '«Проверить снова» does not lift an auth hold');
-  assert.deepEqual(breaker.acquire(8), { probe: true });
+  assert.equal(breaker.acquire(8).probe, true);
   breaker.success();
   for (const reason of ['quota', 'unknown-model', 'not-found']) {
     breaker.acquire(); breaker.failure(reason);
@@ -389,7 +389,7 @@ test('breaker: auth waits for a new key; quota, unknown model and a wrong addres
     assert.throws(() => breaker.acquire());
     assert.equal(breaker.snapshot().hold, 'recheck');
     breaker.recheck();
-    assert.deepEqual(breaker.acquire(), { probe: true });
+    assert.equal(breaker.acquire().probe, true);
     breaker.success();
   }
 });
@@ -444,12 +444,29 @@ test('breaker: a call that never leaves the machine, or that the caller cancels,
   for (let i = 0; i < 5; i++) { shared.acquire(); shared.failure('server'); }
   clock = 30_000;
   const probe = shared.acquire();
-  assert.deepEqual(probe, { probe: true });
+  assert.equal(probe.probe, true);
   shared.failure('rate', 0, early);
   shared.release(early);
   assert.throws(() => shared.acquire(), error => error.errorClass === 'breaker-open', 'the probe in flight keeps its slot');
   shared.release(probe);
-  assert.deepEqual(shared.acquire(), { probe: true });
+  assert.equal(shared.acquire().probe, true);
+});
+
+test('breaker: a late success of a call admitted before it opened does not close it; only the probe does', () => {
+  let now = 0;
+  const breaker = new CircuitBreaker({ threshold: 1, now: () => now });
+  const early = breaker.acquire();
+  const later = breaker.acquire();
+  breaker.failure('server', 0, later);
+  assert.equal(breaker.snapshot().state, 'open');
+  breaker.success(early);
+  assert.equal(breaker.snapshot().state, 'open', 'the earlier request says nothing about the server now');
+  breaker.failure('server', 0, early);
+  assert.equal(breaker.snapshot().retryAt, 30_000, 'nor does its late failure');
+  now = 30_000;
+  const probe = breaker.acquire();
+  breaker.success(probe);
+  assert.equal(breaker.snapshot().state, 'closed');
 });
 
 test('an open breaker skips the call without a request', async () => {

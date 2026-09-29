@@ -6,6 +6,8 @@ const COUNTED: ReadonlySet<S1ErrorClass> = new Set(['transport', 'timeout', 'ser
 const IMMEDIATE: ReadonlySet<S1ErrorClass> = new Set(['auth', 'quota', 'unknown-model', 'not-found']);
 
 export type BreakerHold = 'timed' | 'credential' | 'recheck';
+/** What acquire() admitted: whether the call is the half-open probe, and the breaker generation it was admitted in. */
+export interface BreakerAdmission { probe: boolean; generation: number }
 export interface BreakerSnapshot {
   state: 'closed' | 'open' | 'half-open';
   reason: S1ErrorClass | null;
@@ -34,6 +36,8 @@ export class CircuitBreaker {
   private probing = false;
   /** The state the probe in flight was admitted from, restored when it ends without a verdict. */
   private probeFrom: 'open' | 'half-open' | null = null;
+  /** Bumped whenever the breaker opens: a call admitted before that has no say about the server any more. */
+  private generation = 0;
 
   constructor(options: { threshold?: number; baseOpenMs?: number; maxOpenMs?: number; now?: () => number } = {}) {
     this.threshold = options.threshold ?? 5;
@@ -43,20 +47,25 @@ export class CircuitBreaker {
   }
 
   /** Admits a real call or throws `breaker-open`. Returns whether this call is the half-open probe. */
-  acquire(credentialGeneration = 0): { probe: boolean } {
-    if (this.state === 'closed') return { probe: false };
+  acquire(credentialGeneration = 0): BreakerAdmission {
+    if (this.state === 'closed') return { probe: false, generation: this.generation };
     if (this.state === 'half-open') {
       if (this.probing) throw this.refusal();
       this.probing = true; this.probeFrom = 'half-open';
-      return { probe: true };
+      return { probe: true, generation: this.generation };
     }
     const due = this.hold === 'timed' ? this.now() >= this.openUntil : this.hold === 'credential' && credentialGeneration !== this.credentialGeneration;
     if (!due) throw this.refusal();
     this.state = 'half-open'; this.probing = true; this.probeFrom = 'open';
-    return { probe: true };
+    return { probe: true, generation: this.generation };
   }
 
-  success(): void {
+  /**
+   * A call the server answered. With its admission, a late answer to a call admitted before the breaker last opened
+   * changes nothing, and only the half-open probe closes a breaker that is not closed.
+   */
+  success(admission?: BreakerAdmission): void {
+    if (admission && (admission.generation !== this.generation || this.state !== 'closed' && !(admission.probe && this.probing))) return;
     this.state = 'closed'; this.failures = 0; this.opens = 0; this.hold = null; this.reason = null; this.probing = false; this.probeFrom = null; this.openUntil = 0;
   }
 
@@ -72,9 +81,11 @@ export class CircuitBreaker {
     this.probing = false; this.probeFrom = null;
   }
 
-  failure(errorClass: S1ErrorClass, credentialGeneration = 0, admission?: { probe: boolean }): void {
+  failure(errorClass: S1ErrorClass, credentialGeneration = 0, admission?: BreakerAdmission): void {
     // Rate limits and cancelled calls say nothing about the server's health.
     if (!IMMEDIATE.has(errorClass) && !COUNTED.has(errorClass)) { this.release(admission); return; }
+    // A call admitted before the breaker last opened: that opening already counted the server's state.
+    if (admission && admission.generation !== this.generation) return;
     const probe = this.state === 'half-open';
     this.probing = false; this.probeFrom = null;
     if (IMMEDIATE.has(errorClass)) {
@@ -97,7 +108,7 @@ export class CircuitBreaker {
   }
 
   private open(reason: S1ErrorClass, hold: BreakerHold): void {
-    this.opens++;
+    this.opens++; this.generation++;
     this.state = 'open'; this.hold = hold; this.reason = reason;
     this.openUntil = hold === 'timed' ? this.now() + Math.min(this.maxOpenMs, this.baseOpenMs * 2 ** (this.opens - 1)) : 0;
   }

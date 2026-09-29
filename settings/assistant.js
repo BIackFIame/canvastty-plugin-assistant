@@ -166,17 +166,21 @@
     state = await host.service.request(SERVICE, "state");
     render();
   }
-  async function save(change) {
-    if (!state) return;
-    const next = structuredClone(state.settings);
-    change(next);
-    try {
-      await host.service.request(SERVICE, "save", { settings: next });
-      say(t.saved);
-    } catch (error) {
-      say(`${t.notSaved}${errorText(error)}`);
-    }
-    await load();
+  var saving = Promise.resolve();
+  function save(change) {
+    saving = saving.then(async () => {
+      if (!state) return;
+      const next = structuredClone(state.settings);
+      change(next);
+      try {
+        await host.service.request(SERVICE, "save", { settings: next });
+        say(t.saved);
+      } catch (error) {
+        say(`${t.notSaved}${errorText(error)}`);
+      }
+      await load().catch((error) => say(errorText(error)));
+    });
+    return saving;
   }
   function modeSelect(useCase) {
     const modes = [["off", t.off], ["shadow", t.shadow], ["suggest", t.suggest], ["auto", t.auto]];
@@ -224,16 +228,18 @@
       const saveKey = el("button", { type: "button", textContent: t.saveKey });
       saveKey.addEventListener("click", async () => {
         const value = input.value.trim();
-        input.value = "";
         if (!value) return;
+        let stored = false;
         try {
           await host.secrets.set(slot.secret, JSON.stringify({ origin: slot.origin, value }));
+          stored = true;
+          input.value = "";
           await host.service.request(SERVICE, "keyChanged", { backendId: entry.id });
           say(t.saved);
         } catch (error) {
           say(`${t.notSaved}${errorText(error)}`);
         }
-        await load();
+        if (stored) await load();
       });
       const removeKey = el("button", { type: "button", textContent: t.removeKey });
       removeKey.addEventListener("click", async () => {
