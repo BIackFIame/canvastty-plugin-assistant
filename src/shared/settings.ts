@@ -81,8 +81,6 @@ export interface AssistantSettings {
   /** «Пока учится, также спрашивать умную модель» (§4.1): off by default. */
   shadowAsksSmart: boolean;
   reviewStrictness: ReviewStrictness;
-  /** Optional policy (L20, as an option): refuse a YOLO launch that is not in an isolated environment. */
-  yoloOnlyIsolated: boolean;
   budgets: { perMinute: number; perDay: number; cloudUsdPerDay: number };
   logRetentionDays: number;
 }
@@ -100,7 +98,6 @@ export const DEFAULT_ASSISTANT_SETTINGS: AssistantSettings = {
   smart: { kind: 'none' },
   shadowAsksSmart: false,
   reviewStrictness: 'triage',
-  yoloOnlyIsolated: false,
   budgets: { ...DEFAULT_ASSISTANT_BUDGETS },
   logRetentionDays: LOG_POLICY.retentionDays
 };
@@ -154,7 +151,7 @@ export function validateAssistantSettings(value: unknown): AssistantSettings {
   const keys = Object.keys(DEFAULT_ASSISTANT_SETTINGS);
   exact(value, keys, keys);
   if (typeof value.enabled !== 'boolean' || !['auto', 'jev', 'local'].includes(value.engine as string) || !['off', 'D1', 'D2'].includes(value.grant as string)
-    || typeof value.shadowAsksSmart !== 'boolean' || typeof value.yoloOnlyIsolated !== 'boolean'
+    || typeof value.shadowAsksSmart !== 'boolean'
     || !DATA_CLASS_MODES.includes(value.dataClassMode as DataClassMode) || !DATA_CLASSES.includes(value.defaultDataClass as DataClass)
     || !['triage', 'strict'].includes(value.reviewStrictness as string)) fail();
   exact(value.modes, ASSISTANT_USE_CASES, ASSISTANT_USE_CASES);

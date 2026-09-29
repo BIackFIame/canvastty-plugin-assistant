@@ -20,7 +20,6 @@
       strictness: "Review strictness",
       byTask: "By the task (triage)",
       always: "Always strict",
-      yolo: "YOLO only in an isolated environment (worktree, container, server)",
       data: "Data",
       dataMode: "Data check",
       strict: "Strict",
@@ -80,7 +79,6 @@
       strictness: "\u0421\u0442\u0440\u043E\u0433\u043E\u0441\u0442\u044C \u043F\u0440\u043E\u0432\u0435\u0440\u043A\u0438",
       byTask: "\u041F\u043E \u0437\u0430\u0434\u0430\u0447\u0435 (\u0440\u0430\u0437\u0431\u043E\u0440)",
       always: "\u0412\u0441\u0435\u0433\u0434\u0430 \u0441\u0442\u0440\u043E\u0433\u043E",
-      yolo: "YOLO \u0442\u043E\u043B\u044C\u043A\u043E \u0432 \u0438\u0437\u043E\u043B\u0438\u0440\u043E\u0432\u0430\u043D\u043D\u043E\u0439 \u0441\u0440\u0435\u0434\u0435 (worktree, \u043A\u043E\u043D\u0442\u0435\u0439\u043D\u0435\u0440, \u0441\u0435\u0440\u0432\u0435\u0440)",
       data: "\u0414\u0430\u043D\u043D\u044B\u0435",
       dataMode: "\u041F\u0440\u043E\u0432\u0435\u0440\u043A\u0430 \u0434\u0430\u043D\u043D\u044B\u0445",
       strict: "\u0421\u0442\u0440\u043E\u0433\u043E",
@@ -353,9 +351,6 @@
       row(t.strictness, select(s.reviewStrictness, [["triage", t.byTask], ["strict", t.always]], (value) => void save((next) => {
         next.reviewStrictness = value;
       }), "strictness")),
-      checkbox(s.yoloOnlyIsolated, t.yolo, (value) => void save((next) => {
-        next.yoloOnlyIsolated = value;
-      }), "yolo"),
       el("h2", { textContent: t.backends }),
       backends,
       addForm(),

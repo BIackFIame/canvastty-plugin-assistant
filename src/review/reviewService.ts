@@ -23,6 +23,9 @@ import { collectReferencedFiles } from './referencedFiles.ts';
  *   reads the scripts or diff the command runs. An enforced allow answers `allow` (CanvasTTY applies it only when
  *   the person let this plugin allow, and only for the calls it saw whole); an enforced deny answers `deny`; everything
  *   else, failures included, answers `ask`: the person decides. Nothing ever falls through to allow (R4).
+ * - An agent that cannot put an ask in front of the person (`canAsk: false`: every CLI but Claude Code) gets a deny with
+ *   the same reason and what to do instead. Only a review that could not finish in a card whose own profile still asks
+ *   the person (normal, plan) answers nothing there, so the CLI's own prompt decides instead of blocking all work.
  *
  * A script the agent wrote in this session (or one not committed) is never allowed by the small model alone: only
  * when the larger second reviewer, which reads its text, agrees (R3-V), or by the person.
@@ -39,7 +42,14 @@ export interface DecideRequest {
   tool: { name: string; kind: 'shell' | 'edit' | 'other'; command: string | null; paths: string[] };
   input: unknown;
   truncated: boolean;
+  /** The card's launch profile (auto, normal, acceptEdits, plan, yolo); null or absent from an older CanvasTTY. */
+  profile?: string | null;
+  /** The agent can put an "ask" in front of the person (only Claude Code); absent from an older CanvasTTY: it can. */
+  canAsk?: boolean;
 }
+
+/** Profiles whose CLI still asks the person before it runs a command on its own. */
+const ASKING_PROFILES: ReadonlySet<string> = new Set(['normal', 'plan']);
 
 export type DecideAnswer = { verdict: 'deny' | 'ask' | 'allow'; reason: string } | null;
 
@@ -293,7 +303,14 @@ export class ReviewService {
     if (mode === 'off' || request.event !== 'pre-tool') return null;
     const deadline = this.now() + Math.max(0, budgetMs - MARGIN_MS);
     const signal = AbortSignal.timeout(Math.max(1, deadline - this.now()));
-    const ask = (reason: ReviewReason): DecideAnswer => ({ verdict: 'ask', reason: `CanvasTTY Assistant: ${ASK_MESSAGES[reason] ?? ASK_MESSAGES.unavailable!}` });
+    const ask = (reason: ReviewReason): DecideAnswer => {
+      const why = ASK_MESSAGES[reason] ?? ASK_MESSAGES.unavailable!;
+      if (request.canAsk !== false) return { verdict: 'ask', reason: `CanvasTTY Assistant: ${why}` };
+      // The agent cannot ask the person from here: CanvasTTY would turn an ask into a deny anyway. Say what to do.
+      if (reason === 'unavailable' && typeof request.profile === 'string' && ASKING_PROFILES.has(request.profile)) return null;
+      return { verdict: 'deny', reason: `CanvasTTY Assistant: ${why}. This agent cannot ask the person from here, so it was not run: tell the person what you want to run and why, and let them decide` };
+    };
+    const act = (answer: DecideAnswer): RecentReview['act'] => answer?.verdict ?? null;
     try {
       const state = this.state(request.sessionId);
       const action = actionFromDetail(detailFromHook(request.tool.name, request.input, request.truncated));
@@ -329,8 +346,9 @@ export class ReviewService {
       }
       const verdict = await run();
       if (signal.aborted && !verdict.act) {
-        this.rememberVerdict(request.sessionId, summary, mode, { ...verdict, reason: 'unavailable' }, 'ask');
-        return ask('unavailable');
+        const answer = ask('unavailable');
+        this.rememberVerdict(request.sessionId, summary, mode, { ...verdict, reason: 'unavailable' }, act(answer));
+        return answer;
       }
       if (verdict.act === 'allow') {
         this.rememberVerdict(request.sessionId, summary, mode, verdict, 'allow');
@@ -340,10 +358,12 @@ export class ReviewService {
         this.rememberVerdict(request.sessionId, summary, mode, verdict, 'deny');
         return { verdict: 'deny', reason: MODEL_DENY_MESSAGE };
       }
-      this.rememberVerdict(request.sessionId, summary, mode, verdict, 'ask');
-      return ask(verdict.reason);
+      const answer = ask(verdict.reason);
+      this.rememberVerdict(request.sessionId, summary, mode, verdict, act(answer));
+      return answer;
     } catch {
-      // R4: never an allow. In Auto the person decides; Learning and Suggest enforce nothing.
+      // R4: never an allow. In Auto the person decides (or, for an agent that cannot ask, a deny); Learning and Suggest
+      // enforce nothing.
       return mode === 'auto' ? ask('unavailable') : null;
     }
   }

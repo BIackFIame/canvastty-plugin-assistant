@@ -13,7 +13,7 @@ import {
 
 /**
  * The Assistant service: one process that answers CanvasTTY's decision hook (command review), its launch pipeline
- * (triage and the optional YOLO policy), the orchestrator tools, and the plugin's own settings page. Everything it
+ * (triage of the task the person typed), the orchestrator tools, and the plugin's own settings page. Everything it
  * keeps lives in the plugin's data folder (`assistant/`: the decision log and backend capabilities) and storage
  * (`settings`); backend keys are read from the plugin's secrets only at call time and never leave this process.
  */
@@ -131,14 +131,16 @@ export class Assistant {
   }
 
   // -------------------------------------------------------------------------
-  // EP-2: launch triage and the optional YOLO policy
+  // EP-2: launch triage
   // -------------------------------------------------------------------------
 
-  launch(context: LaunchContext): { refuse: { reason: string } } | null {
-    // The policy holds with the assistant's models off too: it is the person's rule, not a model's.
-    if (this.settings.yoloOnlyIsolated && context.profile === 'yolo' && !context.environment) {
-      return { refuse: { reason: 'YOLO runs only in an isolated environment (Assistant settings). Choose a worktree, container or server under Advanced → Where, or start it without YOLO.' } };
-    }
+  /**
+   * Never refuses. YOLO is CanvasTTY's own rule now (the person's acknowledgement per CLI, never for subagents), and
+   * every non-manual agent runs inside CanvasTTY's isolation layer or its environment's own boundary; the card's
+   * `isolation.state` says which. A worktree is not an isolated environment, so the old "YOLO only isolated" option
+   * (which counted it as one) is gone and a saved value of it is ignored.
+   */
+  launch(context: LaunchContext): null {
     if (context.chosen === false) return null;
     const options = context.options ?? {};
     const task = text(options.task, 2_000) || null;

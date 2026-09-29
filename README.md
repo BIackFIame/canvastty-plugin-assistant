@@ -22,7 +22,11 @@ until you turn it on in its settings page; while off it answers nothing and call
   container, strong model).
 - **Orchestrator tools**: `canvastty-assistant__recommend` (advice before `spawn_agent`) and
   `canvastty-assistant__review_status`.
-- **YOLO only isolated** (optional): refuses a YOLO launch that is not in a worktree, container or server environment.
+- **Agents that cannot ask**: only Claude Code can put a question in front of you from the hook. For every other agent
+  an Auto review that would ask you answers a deny with its reason and what to do instead; a review that could not
+  finish in a card whose profile still asks you (normal, plan) leaves the call to the CLI's own prompt.
+- YOLO and isolation are CanvasTTY's own rules (your acknowledgement per CLI, the isolation layer for non-manual
+  agents); the former "YOLO only isolated" option, which counted a worktree as isolated, is gone.
 - **Data checks**: Strict, Warn only or Off; what may leave this computer (code facts only, texts up to D1 or D2);
   your trust per remote model. A local Ollama model gets everything; keys are redacted before anything is sent.
 
@@ -40,7 +44,7 @@ reads them, at call time, bound to the address they were saved for, and CanvasTT
 ## Needs
 
 CanvasTTY with plugin services and the Assistant extension points (`secrets.get` for services, `decide.timeoutMs`,
-launch policies). Trust the plugin's native code in Settings → Agents → Extension native code, and turn on
+the `profile` and `canAsk` decide fields). Trust the plugin's native code in Settings → Agents → Extension native code, and turn on
 **May allow agent actions** if the Assistant may allow commands on its own.
 
 ## Build

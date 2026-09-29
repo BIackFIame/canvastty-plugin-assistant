@@ -1,5 +1,5 @@
-// The plugin's own layer over the ported chain: the decision service's modes and answers, launch triage and the
-// YOLO policy, the orchestrator tools, keys through the plugin's secrets, and the settings the page saves. No
+// The plugin's own layer over the ported chain: the decision service's modes and answers (and agents that cannot ask),
+// launch triage, the orchestrator tools, keys through the plugin's secrets, and the settings the page saves. No
 // command is ever run; git is scripted or off.
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -160,6 +160,36 @@ test('Auto: the read-only rule allows; an unqualified model outcome and every fa
   assert.notEqual(cut.verdict, 'allow');
 });
 
+test('an agent that cannot ask (canAsk false): an ask becomes a deny with its reason; an unfinished review in a profile that asks leaves it to the CLI', async () => {
+  const cannot = (command, extra = {}) => request(command, { provider: 'codex', canAsk: false, profile: 'auto', ...extra });
+  // Unqualified clean answer: Claude Code would ask the person; Codex gets a deny that says what to do.
+  const engine = fakeEngine({ mode: 'auto' });
+  const { review } = service(engine);
+  const denied = await review.decide(cannot('npm test'), 10_000);
+  assert.equal(denied.verdict, 'deny');
+  assert.match(denied.reason, /not qualified yet\. This agent cannot ask the person from here, so it was not run: tell the person/u);
+  assert.equal(review.recent()[0].act, 'deny', 'the log shows what was enforced');
+  assert.equal((await review.decide(cannot('npm test', { profile: 'normal' }), 10_000)).verdict, 'deny', 'a review verdict is enforced in every profile');
+  // Allow and deny are unchanged.
+  assert.equal((await review.decide(cannot('git status'), 10_000)).verdict, 'allow');
+  // A review that could not finish: deny where the CLI runs on its own, nothing where its own prompt still asks.
+  for (const profile of ['auto', 'acceptEdits', 'yolo', null]) {
+    const failed = await service(fakeEngine({ mode: 'auto', throwAsk: true })).review.decide(cannot('npm test', { profile }), 10_000);
+    assert.equal(failed.verdict, 'deny', String(profile));
+    assert.match(failed.reason, /could not review it in time/u);
+  }
+  for (const profile of ['normal', 'plan']) {
+    const failed = service(fakeEngine({ mode: 'auto', throwAsk: true }));
+    assert.equal(await failed.review.decide(cannot('npm test', { profile }), 10_000), null, profile);
+    const late = service(fakeEngine({ mode: 'auto', qualified: true, delayMs: 400 }));
+    assert.equal(await late.review.decide(cannot('npm test', { profile }), 1_600), null, `${profile}: past its budget`);
+    assert.equal(late.review.recent()[0].act, null);
+  }
+  // canAsk true (Claude Code) or absent (an older CanvasTTY): the person is asked as before.
+  assert.equal((await service(fakeEngine({ mode: 'auto' })).review.decide(request('npm test', { canAsk: true, profile: 'auto' }), 10_000)).verdict, 'ask');
+  assert.equal((await service(fakeEngine({ mode: 'auto', throwAsk: true })).review.decide(request('npm test', { profile: 'normal' }), 10_000)).verdict, 'ask');
+});
+
 test('Auto: a strict session (triage or the global setting) allows only read-only; a suspect session nothing; three model denials make it person-only', async () => {
   const strict = service(fakeEngine({ mode: 'auto', qualified: true }), { reviewStrictness: 'strict' });
   strict.review.noteLaunch('s1', { task: 'Run the unit tests', dataClass: null, triage: false });
@@ -211,7 +241,9 @@ test('settings: a bad backend disables only itself, a bad field falls back alone
   assert.equal(normalized.enabled, false);
   assert.deepEqual(normalized.backends.map(b => b.id), ['ok']);
   assert.deepEqual(normalized.modes, { 'task.route': 'suggest', 'command.review': 'auto' });
-  assert.deepEqual([normalized.engine, normalized.reviewStrictness, normalized.yoloOnlyIsolated], ['jev', 'triage', true]);
+  assert.deepEqual([normalized.engine, normalized.reviewStrictness], ['jev', 'triage']);
+  assert.equal(Object.hasOwn(normalized, 'yoloOnlyIsolated'), false, 'the removed YOLO option is dropped from saved settings');
+  assert.throws(() => validateAssistantSettings({ ...normalized, yoloOnlyIsolated: true }), 'and no longer accepted from the page');
   assert.throws(() => validateAssistantSettings({ ...normalized, grant: 'D3' }));
   assert.throws(() => validateAssistantSettings({ ...normalized, backends: [{ id: 'l', preset: 'laya', enabled: true, url: 'http://192.168.1.2:8000' }] }), /address/u);
 });
@@ -234,17 +266,20 @@ function hostFake(storage = {}, secrets = {}) {
   return host;
 }
 
-test('launch: YOLO outside an isolated environment is refused when the person asked for it; policy checks do nothing else', () => {
+test('launch: the Assistant never refuses a launch (YOLO and isolation are CanvasTTY\'s own rules); no launch policy', async () => {
   const host = hostFake();
   const dataDir = mkdtempSync(join(base, 'data-'));
+  // A saved value of the removed option changes nothing, a worktree included (it was counted as isolated).
   const assistant = new Assistant({ host, dataDir, settings: { yoloOnlyIsolated: true } });
   const context = { sessionId: 's', provider: 'claude', role: 'agent', cwd: project, restoring: false, resume: false, options: {} };
-  assert.match(assistant.launch({ ...context, profile: 'yolo', chosen: false, environment: null }).refuse.reason, /isolated environment/u);
-  assert.equal(assistant.launch({ ...context, profile: 'yolo', chosen: false, environment: { pluginId: 'e', kind: 'worktree' } }), null);
-  assert.equal(assistant.launch({ ...context, profile: 'normal', chosen: false, environment: null }), null);
-  assistant.settings = normalizeAssistantSettings({});
-  assert.equal(assistant.launch({ ...context, profile: 'yolo', chosen: false, environment: null }), null, 'off by default');
-  assert.equal(host.calls.length, 0, 'a policy check calls nothing');
+  for (const environment of [null, { pluginId: 'e', kind: 'worktree' }]) {
+    assert.equal(assistant.launch({ ...context, profile: 'yolo', chosen: false, environment }), null);
+    assert.equal(assistant.launch({ ...context, profile: 'yolo', chosen: true, environment }), null);
+  }
+  assert.equal(host.calls.length, 0, 'nothing is called without a task');
+  const { readFileSync } = await import('node:fs');
+  const manifest = JSON.parse(readFileSync(new URL('../canvastty.plugin.json', import.meta.url), 'utf8'));
+  assert.equal(manifest.services[0].launch.policy, undefined, 'not asked before launches the person did not choose it for');
 });
 
 test('launch triage: the person\'s task feeds review and, when a model answers, a badge and the card\'s strictness', async t => {

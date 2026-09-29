@@ -34,7 +34,7 @@ test('the manifest passes CanvasTTY\'s own validator (when CANVASTTY_REPO points
   const { validatePluginManifest } = await import(join(process.env.CANVASTTY_REPO, 'src/main/services/PluginManager.ts'));
   const checked = validatePluginManifest(manifest);
   assert.deepEqual(checked.services[0].decide, { events: ['pre-tool'], timeoutMs: 45_000 });
-  assert.equal(checked.services[0].launch.policy, true);
+  assert.equal(checked.services[0].launch.policy, undefined);
   assert.deepEqual(checked.services[0].tools.map(tool => tool.name), ['recommend', 'review_status']);
 });
 
@@ -125,9 +125,9 @@ test('end to end over JSON-RPC: off answers nothing; on in Auto the rule allows 
   assert.equal(state.status.backends[0].tested, true);
   assert.equal(state.recent.length, 3);
 
-  // Tools and the launch policy through the same process.
+  // Tools and a launch through the same process.
   const caller = { id: 'orch-1', provider: 'claude', role: 'orchestrator', title: 'o', status: 'idle', cwd: project, workingDirectory: project };
   const status = JSON.parse((await service.request('canvastty.tools.call', { tool: 'review_status', caller, input: {} })).content);
   assert.equal(status.commandReview, 'auto');
-  assert.equal(await service.request('canvastty.launch.prepare', { sessionId: 's2', provider: 'claude', profile: 'yolo', role: 'agent', cwd: project, restoring: false, resume: false, options: {}, chosen: false, environment: null }), null);
+  assert.equal(await service.request('canvastty.launch.prepare', { sessionId: 's2', provider: 'claude', profile: 'yolo', role: 'agent', cwd: project, restoring: false, resume: false, options: {}, chosen: true, environment: null }), null);
 });

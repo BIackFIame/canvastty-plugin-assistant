@@ -479,7 +479,6 @@ var DEFAULT_ASSISTANT_SETTINGS = {
   smart: { kind: "none" },
   shadowAsksSmart: false,
   reviewStrictness: "triage",
-  yoloOnlyIsolated: false,
   budgets: { ...DEFAULT_ASSISTANT_BUDGETS },
   logRetentionDays: LOG_POLICY.retentionDays
 };
@@ -535,7 +534,7 @@ function validateAssistantBackend(value) {
 function validateAssistantSettings(value) {
   const keys = Object.keys(DEFAULT_ASSISTANT_SETTINGS);
   exact(value, keys, keys);
-  if (typeof value.enabled !== "boolean" || !["auto", "jev", "local"].includes(value.engine) || !["off", "D1", "D2"].includes(value.grant) || typeof value.shadowAsksSmart !== "boolean" || typeof value.yoloOnlyIsolated !== "boolean" || !DATA_CLASS_MODES.includes(value.dataClassMode) || !DATA_CLASSES.includes(value.defaultDataClass) || !["triage", "strict"].includes(value.reviewStrictness)) fail();
+  if (typeof value.enabled !== "boolean" || !["auto", "jev", "local"].includes(value.engine) || !["off", "D1", "D2"].includes(value.grant) || typeof value.shadowAsksSmart !== "boolean" || !DATA_CLASS_MODES.includes(value.dataClassMode) || !DATA_CLASSES.includes(value.defaultDataClass) || !["triage", "strict"].includes(value.reviewStrictness)) fail();
   exact(value.modes, ASSISTANT_USE_CASES, ASSISTANT_USE_CASES);
   for (const useCase of ASSISTANT_USE_CASES) if (!MODES.includes(value.modes[useCase])) fail("Invalid assistant mode.");
   if (!Array.isArray(value.backends) || value.backends.length > MAX_ASSISTANT_BACKENDS) fail("Too many assistant backends.");
@@ -7346,6 +7345,7 @@ function exactAllow(facts) {
 }
 
 // src/review/reviewService.ts
+var ASKING_PROFILES = /* @__PURE__ */ new Set(["normal", "plan"]);
 var MAX_SESSIONS = 512;
 var MAX_RECENT = 40;
 var MARGIN_MS = 1500;
@@ -7599,7 +7599,13 @@ var ReviewService = class {
     if (mode === "off" || request.event !== "pre-tool") return null;
     const deadline = this.now() + Math.max(0, budgetMs - MARGIN_MS);
     const signal = AbortSignal.timeout(Math.max(1, deadline - this.now()));
-    const ask = (reason) => ({ verdict: "ask", reason: `CanvasTTY Assistant: ${ASK_MESSAGES[reason] ?? ASK_MESSAGES.unavailable}` });
+    const ask = (reason) => {
+      const why = ASK_MESSAGES[reason] ?? ASK_MESSAGES.unavailable;
+      if (request.canAsk !== false) return { verdict: "ask", reason: `CanvasTTY Assistant: ${why}` };
+      if (reason === "unavailable" && typeof request.profile === "string" && ASKING_PROFILES.has(request.profile)) return null;
+      return { verdict: "deny", reason: `CanvasTTY Assistant: ${why}. This agent cannot ask the person from here, so it was not run: tell the person what you want to run and why, and let them decide` };
+    };
+    const act = (answer) => answer?.verdict ?? null;
     try {
       const state = this.state(request.sessionId);
       const action = actionFromDetail(detailFromHook(request.tool.name, request.input, request.truncated));
@@ -7637,8 +7643,9 @@ var ReviewService = class {
       }
       const verdict = await run();
       if (signal.aborted && !verdict.act) {
-        this.rememberVerdict(request.sessionId, summary, mode, { ...verdict, reason: "unavailable" }, "ask");
-        return ask("unavailable");
+        const answer2 = ask("unavailable");
+        this.rememberVerdict(request.sessionId, summary, mode, { ...verdict, reason: "unavailable" }, act(answer2));
+        return answer2;
       }
       if (verdict.act === "allow") {
         this.rememberVerdict(request.sessionId, summary, mode, verdict, "allow");
@@ -7648,8 +7655,9 @@ var ReviewService = class {
         this.rememberVerdict(request.sessionId, summary, mode, verdict, "deny");
         return { verdict: "deny", reason: MODEL_DENY_MESSAGE };
       }
-      this.rememberVerdict(request.sessionId, summary, mode, verdict, "ask");
-      return ask(verdict.reason);
+      const answer = ask(verdict.reason);
+      this.rememberVerdict(request.sessionId, summary, mode, verdict, act(answer));
+      return answer;
     } catch {
       return mode === "auto" ? ask("unavailable") : null;
     }
@@ -7929,12 +7937,15 @@ var Assistant = class {
     return this.review.decide(params, Math.min(budget, DECIDE_BUDGET_MS));
   }
   // -------------------------------------------------------------------------
-  // EP-2: launch triage and the optional YOLO policy
+  // EP-2: launch triage
   // -------------------------------------------------------------------------
+  /**
+   * Never refuses. YOLO is CanvasTTY's own rule now (the person's acknowledgement per CLI, never for subagents), and
+   * every non-manual agent runs inside CanvasTTY's isolation layer or its environment's own boundary; the card's
+   * `isolation.state` says which. A worktree is not an isolated environment, so the old "YOLO only isolated" option
+   * (which counted it as one) is gone and a saved value of it is ignored.
+   */
   launch(context) {
-    if (this.settings.yoloOnlyIsolated && context.profile === "yolo" && !context.environment) {
-      return { refuse: { reason: "YOLO runs only in an isolated environment (Assistant settings). Choose a worktree, container or server under Advanced \u2192 Where, or start it without YOLO." } };
-    }
     if (context.chosen === false) return null;
     const options = context.options ?? {};
     const task = text3(options.task, 2e3) || null;
