@@ -1,6 +1,6 @@
 # CanvasTTY Assistant
 
-> **Status: preview.** This plugin needs CanvasTTY plugin API v2 (plugin services, launch contributors, session environments, decision hooks, plugin tools and card actions). Those extension points are proposed upstream and are not in a released CanvasTTY yet, so installing it on a current release fails the manifest check.
+> **Requires the CanvasTTY core with plugin API v2** (plugin services, launch contributors, session environments, decision hooks, plugin tools and card actions, and the `profile`/`canAsk` decide fields): the upcoming release after 1.7.0. CanvasTTY 1.7.0 and earlier do not have these extension points, so installing it there fails the manifest check.
 
 [English](README.md) · [Русский](README.ru.md)
 
@@ -40,6 +40,19 @@ until you turn it on in its settings page; while off it answers nothing and call
 Keys are written from the settings page straight into the plugin's secrets and never shown again; only the service
 reads them, at call time, bound to the address they were saved for, and CanvasTTY masks them in everything agents read.
 **Check** («Проверить») runs a fixed synthetic battery (no data of yours).
+
+## Limits
+
+- Budgets per minute, per day and in USD per day for cloud calls. A cloud call holds an upper estimate of its cost
+  against the USD cap while it runs, so parallel calls cannot pass the cap together; the real cost replaces it.
+- A failing model server opens a circuit breaker; late answers to calls admitted before it opened change nothing, and
+  only the one probe call closes it again.
+- A model server on this computer (loopback, confirmed local) gets one request at a time with a queue of 4; the
+  second reviewer shares that slot.
+- Memory: statistics keep what the log keeps (`logRetentionDays`, at most 100 000 decisions); per-session review state
+  is kept for at most 512 sessions, least recently used dropped first.
+- Between the service and CanvasTTY a frame is at most 1 MiB, a host call fails after 30 s or past 64 in flight, and
+  while CanvasTTY is not reading, waiting events and logs are capped at 8 MiB (answers are never dropped).
 
 ## Needs
 
