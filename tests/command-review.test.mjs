@@ -565,3 +565,20 @@ test('one-way property: across random answers, facts and modes, every allow is t
 // ---------------------------------------------------------------------------
 // The service: circuit, suspect, labels, off
 // ---------------------------------------------------------------------------
+
+test('the write tracker and the review service keep a bounded number of sessions', async () => {
+  const tracker = new SessionWriteTracker(3);
+  for (let n = 0; n < 10; n++) tracker.note(`s${n}`, [`/tmp/project/f${n}`], 'write');
+  assert.equal(tracker.size, 3);
+  assert.equal(tracker.origin('s9', '/tmp/project/f9'), 'write');
+  assert.equal(tracker.origin('s0', '/tmp/project/f0'), null, 'the oldest session went');
+  // The service drops a session evicted from its own map from the tracker (and the circuit) too.
+  const { ReviewService } = await import('../src/review/reviewService.ts');
+  const review = new ReviewService({ engine: {}, settings: () => ({}), git: null });
+  review.noteLaunch('first', { task: null, dataClass: null, triage: false });
+  review.tracker.note('first', ['/tmp/project/a'], 'download');
+  for (let n = 0; n < 600; n++) review.noteLaunch(`card-${n}`, { task: null, dataClass: null, triage: false });
+  assert.equal(review.tracker.origin('first', '/tmp/project/a'), null);
+  for (let n = 0; n < 600; n++) review.tracker.note(`card-${n}`, ['/tmp/project/b'], 'write');
+  assert.ok(review.tracker.size <= 512);
+});

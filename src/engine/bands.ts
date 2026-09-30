@@ -185,14 +185,23 @@ export function reviewOutcome(facts: ReviewFacts, lightAnswers: Readonly<Record<
   return person('the reviews do not agree');
 }
 
-/** §3.1b rule 6: after 3 model denials in a row, or 20 in a session, the session goes to person-only. */
+/**
+ * §3.1b rule 6: after 3 model denials in a row, or 20 in a session, the session goes to person-only. At most
+ * `maxSessions` sessions are kept (the least recently reviewed goes first), so a session whose close never
+ * arrives cannot grow it.
+ */
 export class ReviewCircuit {
   private readonly sessions = new Map<string, { consecutive: number; total: number }>();
+  private readonly maxSessions: number;
+  constructor(maxSessions = 512) { this.maxSessions = maxSessions; }
   record(sessionId: string, outcome: ReviewOutcome, enforced: boolean): void {
     const entry = this.sessions.get(sessionId) ?? { consecutive: 0, total: 0 };
     if (outcome === 'block' && enforced) { entry.consecutive++; entry.total++; } else if (outcome !== 'block') entry.consecutive = 0;
+    this.sessions.delete(sessionId);
     this.sessions.set(sessionId, entry);
+    while (this.sessions.size > this.maxSessions) this.sessions.delete(this.sessions.keys().next().value!);
   }
+  get size(): number { return this.sessions.size; }
   personOnly(sessionId: string): boolean {
     const entry = this.sessions.get(sessionId);
     return !!entry && (entry.consecutive >= REVIEW_RULES.circuitConsecutive || entry.total >= REVIEW_RULES.circuitPerSession);

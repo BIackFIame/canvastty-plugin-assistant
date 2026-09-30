@@ -124,14 +124,21 @@ const TRACK_MAX = 2_000;
 
 /**
  * What each session wrote, as far as CanvasTTY saw it: ACP edit/delete/move tool calls and the write targets of
- * every command it reviewed (whatever the answer; a superset is the safe side). Memory only, bounded.
+ * every command it reviewed (whatever the answer; a superset is the safe side). Memory only, bounded: at most
+ * TRACK_MAX paths per session and `maxSessions` sessions (the one that wrote least recently goes first).
  */
 export class SessionWriteTracker {
   private readonly sessions = new Map<string, Map<string, WriteOrigin>>();
+  private readonly maxSessions: number;
+  constructor(maxSessions = 512) { this.maxSessions = maxSessions; }
+
+  get size(): number { return this.sessions.size; }
 
   note(sessionId: string, paths: readonly string[], origin: WriteOrigin): void {
     let entries = this.sessions.get(sessionId);
-    if (!entries) { entries = new Map(); this.sessions.set(sessionId, entries); }
+    if (entries) this.sessions.delete(sessionId); else entries = new Map();
+    this.sessions.set(sessionId, entries);
+    while (this.sessions.size > this.maxSessions) this.sessions.delete(this.sessions.keys().next().value!);
     for (const path of paths) {
       if (typeof path !== 'string' || !isAbsolute(path) || path.length > 4_096) continue;
       const key = realish(path);

@@ -8,7 +8,9 @@ var RPC_LIMITS = Object.freeze({
   hostCalls: 64,
   activeHandlers: 64,
   /** CanvasTTY waits 2 s after canvastty.shutdown before SIGTERM. */
-  drainMs: 1500
+  drainMs: 1500,
+  /** Events and logs held while the host is not reading, at most. */
+  outboundBytes: 8 * 1048576
 });
 function serve({ methods, notifications = {}, onInitialize, input = process.stdin, output = process.stdout, exit = (code) => process.exit(code), limits = {} }) {
   const limit = { ...RPC_LIMITS, ...limits };
@@ -18,9 +20,60 @@ function serve({ methods, notifications = {}, onInitialize, input = process.stdi
   let stopping = false;
   let hostGone = false;
   let onIdle = null;
-  const send = (message) => {
-    output.write(`${JSON.stringify({ jsonrpc: "2.0", ...message })}
-`);
+  const queue = [];
+  let held = 0;
+  let blocked = false;
+  let dropped = 0;
+  let onFlushed = null;
+  const write = (text4) => {
+    if (output.write(text4) === false && typeof output.once === "function") {
+      blocked = true;
+      output.once("drain", flush);
+    }
+  };
+  function flush() {
+    blocked = false;
+    while (queue.length && !blocked) {
+      const frame = queue.shift();
+      if (frame.droppable) held -= frame.bytes;
+      write(frame.text);
+    }
+    if (blocked) return;
+    if (dropped) {
+      const count2 = dropped;
+      dropped = 0;
+      send({ method: "log", params: { level: "warn", message: `Dropped ${count2} events or logs while the host was not reading.` } }, true);
+    }
+    if (!blocked && !queue.length) onFlushed?.();
+  }
+  const send = (message, droppable = false) => {
+    const text4 = `${JSON.stringify({ jsonrpc: "2.0", ...message })}
+`;
+    const bytes = Buffer.byteLength(text4);
+    if (bytes > limit.frameBytes && message.method !== "log") return false;
+    if (!blocked) {
+      write(text4);
+      return true;
+    }
+    if (droppable) {
+      for (let at = 0; held + bytes > limit.outboundBytes && at < queue.length; ) {
+        const frame = queue[at];
+        if (!frame.droppable) {
+          at++;
+          continue;
+        }
+        held -= frame.bytes;
+        queue.splice(at, 1);
+        dropped++;
+      }
+      if (held + bytes > limit.outboundBytes) {
+        dropped++;
+        return true;
+      }
+      held += bytes;
+    }
+    queue.push({ text: text4, bytes, droppable });
+    return true;
   };
   const host = {
     callHost: (method, params) => new Promise((resolve4, reject) => {
@@ -38,10 +91,18 @@ function serve({ methods, notifications = {}, onInitialize, input = process.stdi
         reject(new Error(`The host did not answer ${method} in time.`));
       }, limit.hostCallMs);
       pending.set(id, { resolve: resolve4, reject, timer });
-      send({ id, method, params });
+      if (!send({ id, method, params })) {
+        clearTimeout(timer);
+        pending.delete(id);
+        reject(new Error(`The ${method} request is larger than the frame limit.`));
+      }
     }),
-    log: (level, message) => send({ method: "log", params: { level, message: String(message).slice(0, 500) } }),
-    emit: (event, data) => send({ method: "event", params: { event, data } })
+    log: (level, message) => {
+      send({ method: "log", params: { level, message: String(message).slice(0, 500) } }, true);
+    },
+    emit: (event, data) => {
+      if (!send({ method: "event", params: { event, data } }, true)) host.log("warn", `Dropped a ${String(event).slice(0, 80)} event larger than the frame limit.`);
+    }
   };
   const record2 = (value) => value && typeof value === "object" && !Array.isArray(value) ? value : {};
   const errorText = (error) => error instanceof Error ? error.message : String(error);
@@ -55,10 +116,17 @@ function serve({ methods, notifications = {}, onInitialize, input = process.stdi
   const stop = () => {
     if (stopping) return;
     stopping = true;
-    const timer = setTimeout(() => exit(0), limit.drainMs);
-    onIdle = () => {
+    let exited = false;
+    const finish = () => {
+      if (exited) return;
+      exited = true;
       clearTimeout(timer);
       exit(0);
+    };
+    const timer = setTimeout(finish, limit.drainMs);
+    onIdle = () => {
+      if (blocked || queue.length) onFlushed = finish;
+      else finish();
     };
     if (active === 0) onIdle();
   };
@@ -98,7 +166,9 @@ function serve({ methods, notifications = {}, onInitialize, input = process.stdi
         if (!handler) throw Object.assign(new Error(`Unknown method: ${method}`), { code: -32601 });
         return handler(record2(message.params), host);
       }).then(
-        (result) => send({ id: message.id, result: result ?? null }),
+        (result) => {
+          if (!send({ id: message.id, result: result ?? null })) send({ id: message.id, error: { code: -32e3, message: "The answer is larger than the frame limit." } });
+        },
         (error2) => send({ id: message.id, error: { code: error2?.code ?? -32e3, message: errorText(error2).slice(0, 400) } })
       );
       return;
@@ -3377,6 +3447,8 @@ function wilsonUpper(errors, n, z = WILSON_Z.default) {
 
 // src/engine/AssistantStats.ts
 var HIGH_CONFIDENCE = 0.9;
+var STATS_MAX_DECISIONS = 1e5;
+var labelKey = (record2) => JSON.stringify([record2.auditId, record2.at, record2.source, record2.label, record2.agrees]);
 function decisionConfidence(record2) {
   let lowest = 1;
   for (const answer of Object.values(record2.answers ?? {})) {
@@ -3403,7 +3475,7 @@ var AssistantStats = class {
       this.decisions.set(record2.id, record2);
       return;
     }
-    const key = JSON.stringify([record2.auditId, record2.at, record2.source, record2.label, record2.agrees]);
+    const key = labelKey(record2);
     if (this.seenLabels.has(key)) return;
     this.seenLabels.add(key);
     this.labels.push(record2);
@@ -3415,6 +3487,30 @@ var AssistantStats = class {
     this.decisions.clear();
     this.labels.length = 0;
     this.seenLabels.clear();
+  }
+  get size() {
+    return { decisions: this.decisions.size, labels: this.labels.length };
+  }
+  /**
+   * Memory follows the log's retention: decisions and labels older than `before` go, then the oldest decisions past
+   * `maxDecisions`, with the labels joined to them — what a restart would read back from the log is what stays.
+   */
+  prune(before, maxDecisions = STATS_MAX_DECISIONS) {
+    const gone = /* @__PURE__ */ new Set();
+    for (const [id, record2] of this.decisions) if (record2.at < before) gone.add(id);
+    if (this.decisions.size - gone.size > maxDecisions) {
+      const rest = [...this.decisions.values()].filter((record2) => !gone.has(record2.id)).sort((a, b) => a.at - b.at);
+      for (const record2 of rest.slice(0, rest.length - maxDecisions)) gone.add(record2.id);
+    }
+    for (const id of gone) this.decisions.delete(id);
+    const kept = this.labels.filter((label) => label.at >= before && !gone.has(label.auditId));
+    if (kept.length === this.labels.length) return;
+    this.labels.length = 0;
+    this.seenLabels.clear();
+    for (const label of kept) {
+      this.labels.push(label);
+      this.seenLabels.add(labelKey(label));
+    }
   }
   /** Labels that count for a use case: non-proxy, and for command review only the person's own. */
   counts(useCase, label) {
@@ -3603,13 +3699,22 @@ function reviewOutcome(facts, lightAnswers, ctx, smartAnswers) {
 }
 var ReviewCircuit = class {
   sessions = /* @__PURE__ */ new Map();
+  maxSessions;
+  constructor(maxSessions = 512) {
+    this.maxSessions = maxSessions;
+  }
   record(sessionId, outcome, enforced) {
     const entry = this.sessions.get(sessionId) ?? { consecutive: 0, total: 0 };
     if (outcome === "block" && enforced) {
       entry.consecutive++;
       entry.total++;
     } else if (outcome !== "block") entry.consecutive = 0;
+    this.sessions.delete(sessionId);
     this.sessions.set(sessionId, entry);
+    while (this.sessions.size > this.maxSessions) this.sessions.delete(this.sessions.keys().next().value);
+  }
+  get size() {
+    return this.sessions.size;
   }
   personOnly(sessionId) {
     const entry = this.sessions.get(sessionId);
@@ -4431,6 +4536,7 @@ var SmartVerifier = class {
 };
 
 // src/engine/AssistantEngine.ts
+var STATS_PRUNE_MS = 36e5;
 var RELAXING = /* @__PURE__ */ new Set(["default", "auto-allow", "verify-allow"]);
 function familyOf(entry) {
   if (isJevPreset(entry.preset)) return "jev";
@@ -4463,6 +4569,7 @@ var AssistantEngine = class _AssistantEngine {
   built = /* @__PURE__ */ new Map();
   versions = /* @__PURE__ */ new Map();
   statsLoaded = null;
+  statsPrunedAt = 0;
   epoch = 0;
   revision = "";
   controller = new AbortController();
@@ -4860,6 +4967,7 @@ var AssistantEngine = class _AssistantEngine {
   async write(input) {
     const record2 = decisionRecord(input);
     this.stats.ingest(record2);
+    this.pruneStats();
     try {
       await this.log.append(record2);
     } catch {
@@ -4867,10 +4975,22 @@ var AssistantEngine = class _AssistantEngine {
   }
   appendLabel(record2) {
     this.stats.ingest(record2);
+    this.pruneStats();
     void this.log.append(record2).catch(() => void 0);
   }
+  /** The oldest record the statistics keep: the log's own retention window. */
+  statsFrom() {
+    return this.now() - this.assistant().logRetentionDays * 864e5;
+  }
+  /** Keeps the in-memory statistics to the log's retention (swept hourly, or at once past the decision cap). */
+  pruneStats() {
+    const now = this.now();
+    if (now - this.statsPrunedAt < STATS_PRUNE_MS && this.stats.size.decisions <= STATS_MAX_DECISIONS) return;
+    this.statsPrunedAt = now;
+    this.stats.prune(this.statsFrom());
+  }
   loadStats() {
-    this.statsLoaded ??= this.log.read(this.now() - 400 * 864e5).then((records) => this.stats.ingestAll(records), () => void 0);
+    this.statsLoaded ??= this.log.read(this.statsFrom()).then((records) => this.stats.ingestAll(records), () => void 0);
     return this.statsLoaded;
   }
   // -------------------------------------------------------------------------
@@ -4888,6 +5008,8 @@ var AssistantEngine = class _AssistantEngine {
     if (decision.mode === "shadow" && !assistant2.shadowAsksSmart) return null;
     const reservation = this.budget.reserve({ useCase: request.useCase, cloud: false, ...ctx.sessionId ? { sessionId: ctx.sessionId } : {} });
     if (!reservation) return null;
+    let local = null;
+    let sent = false;
     try {
       const fields = [...request.fields, ...extra].map((field) => {
         if (typeof field.value === "string" && field.bound !== void 0) return { ...field, value: redactAndBound(field.value, field.bound).text };
@@ -4898,13 +5020,23 @@ var AssistantEngine = class _AssistantEngine {
         reservation.release();
         return null;
       }
+      local = this.budget.local(ctx.signal);
+      if (!local) {
+        reservation.release();
+        return null;
+      }
+      await local.ready;
+      sent = true;
       const answer = await this.smart.ask(structuredClone(QUESTION_SETS[request.set]), gated.state, { signal: this.linked(ctx.signal), deadlineAt: this.now() + SMART_DEADLINE_MS });
       reservation.commit(0);
       ctx.assertCurrent();
       return answer.answers;
     } catch {
-      reservation.commit(0);
+      if (sent) reservation.commit(0);
+      else reservation.release();
       return null;
+    } finally {
+      local?.release();
     }
   }
   // -------------------------------------------------------------------------
@@ -5624,12 +5756,19 @@ function factPhrases(f) {
 var TRACK_MAX = 2e3;
 var SessionWriteTracker = class {
   sessions = /* @__PURE__ */ new Map();
+  maxSessions;
+  constructor(maxSessions = 512) {
+    this.maxSessions = maxSessions;
+  }
+  get size() {
+    return this.sessions.size;
+  }
   note(sessionId, paths, origin) {
     let entries = this.sessions.get(sessionId);
-    if (!entries) {
-      entries = /* @__PURE__ */ new Map();
-      this.sessions.set(sessionId, entries);
-    }
+    if (entries) this.sessions.delete(sessionId);
+    else entries = /* @__PURE__ */ new Map();
+    this.sessions.set(sessionId, entries);
+    while (this.sessions.size > this.maxSessions) this.sessions.delete(this.sessions.keys().next().value);
     for (const path of paths) {
       if (typeof path !== "string" || !isAbsolute2(path) || path.length > 4096) continue;
       const key = realish(path);
@@ -7527,9 +7666,9 @@ function tierOf(verdict) {
   return verdict.model ? "light" : null;
 }
 var ReviewService = class {
-  tracker = new SessionWriteTracker();
+  tracker = new SessionWriteTracker(MAX_SESSIONS);
   options;
-  circuit = new ReviewCircuit();
+  circuit = new ReviewCircuit(MAX_SESSIONS);
   sessions = /* @__PURE__ */ new Map();
   recentReviews = [];
   now;
@@ -7542,7 +7681,7 @@ var ReviewService = class {
     if (!state) {
       state = { suspect: false, personRequest: null, dataClass: null, strict: false };
       this.sessions.set(sessionId, state);
-      while (this.sessions.size > MAX_SESSIONS) this.sessions.delete(this.sessions.keys().next().value);
+      while (this.sessions.size > MAX_SESSIONS) this.forget(this.sessions.keys().next().value);
     }
     return state;
   }

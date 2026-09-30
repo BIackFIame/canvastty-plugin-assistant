@@ -16,13 +16,16 @@ import { AssistantBudget } from './AssistantBudget.ts';
 import { AssistantCache, canonicalJson, questionSetHash } from './AssistantCache.ts';
 import { AssistantLog, decisionRecord, type DecisionRecordInput, type LabelRecord } from './AssistantLog.ts';
 import { AssistantSecrets, type DecisionSecretsLike } from './AssistantSecrets.ts';
-import { AssistantStats } from './AssistantStats.ts';
+import { AssistantStats, STATS_MAX_DECISIONS } from './AssistantStats.ts';
 import { bandOf, thresholdFor } from './bands.ts';
 import { CapsStore, engineUse, IncompatibilityTracker, runBattery, supportsSet } from './conformance.ts';
 import { backendLevel, gateFields, gateTarget, type AssistantField, type GateTarget } from './privacyGate.ts';
 import { redactAndBound, redactValue } from './redact.ts';
 import { ShadowRecorder } from './ShadowRecorder.ts';
 import { SmartVerifier } from './SmartVerifier.ts';
+
+/** How often the in-memory statistics are swept to the log's retention. */
+const STATS_PRUNE_MS = 3_600_000;
 
 /**
  * The one engine every decision of the plugin goes through (assistant spec §2.7), ported from the CanvasTTY chain.
@@ -109,6 +112,7 @@ export class AssistantEngine {
   private readonly built = new Map<string, Built>();
   private readonly versions = new Map<string, string | null>();
   private statsLoaded: Promise<void> | null = null;
+  private statsPrunedAt = 0;
   private epoch = 0;
   private revision = '';
   private controller = new AbortController();
@@ -439,17 +443,30 @@ export class AssistantEngine {
   private async write(input: DecisionRecordInput): Promise<void> {
     const record = decisionRecord(input);
     this.stats.ingest(record);
+    this.pruneStats();
     try { await this.log.append(record); } catch { /* a log that cannot be written never changes a decision */ }
   }
 
   private appendLabel(record: LabelRecord): void {
     this.stats.ingest(record);
+    this.pruneStats();
     void this.log.append(record).catch(() => undefined);
+  }
+
+  /** The oldest record the statistics keep: the log's own retention window. */
+  private statsFrom(): number { return this.now() - this.assistant().logRetentionDays * 86_400_000; }
+
+  /** Keeps the in-memory statistics to the log's retention (swept hourly, or at once past the decision cap). */
+  private pruneStats(): void {
+    const now = this.now();
+    if (now - this.statsPrunedAt < STATS_PRUNE_MS && this.stats.size.decisions <= STATS_MAX_DECISIONS) return;
+    this.statsPrunedAt = now;
+    this.stats.prune(this.statsFrom());
   }
 
   private loadStats(): Promise<void> {
     // Records already ingested in this run are kept; the log fills in what came before (duplicates are ignored).
-    this.statsLoaded ??= this.log.read(this.now() - 400 * 86_400_000).then(records => this.stats.ingestAll(records), () => undefined);
+    this.statsLoaded ??= this.log.read(this.statsFrom()).then(records => this.stats.ingestAll(records), () => undefined);
     return this.statsLoaded;
   }
 
@@ -469,6 +486,8 @@ export class AssistantEngine {
     if (decision.mode === 'shadow' && !assistant.shadowAsksSmart) return null;
     const reservation = this.budget.reserve({ useCase: request.useCase, cloud: false, ...(ctx.sessionId ? { sessionId: ctx.sessionId } : {}) });
     if (!reservation) return null;
+    let local: { ready: Promise<void>; release(): void } | null = null;
+    let sent = false;
     try {
       const fields = [...request.fields, ...extra].map(field => {
         if (typeof field.value === 'string' && field.bound !== undefined) return { ...field, value: redactAndBound(field.value, field.bound).text };
@@ -477,13 +496,20 @@ export class AssistantEngine {
       // Local model: D3 in every mode (the §1.4 local rule is proven by the verifier's own probe).
       const gated = gateFields(fields, assistant.dataClassMode, assistant.grant, { kind: 'local' }, false);
       if (gated.variant !== 'full') { reservation.release(); return null; }
+      // The same local model as the light tier's local backends: one request at a time, a queue of 4 (§5.5).
+      local = this.budget.local(ctx.signal);
+      if (!local) { reservation.release(); return null; }
+      await local.ready;
+      sent = true;
       const answer = await this.smart.ask(structuredClone(QUESTION_SETS[request.set]) as Record<string, S1Question>, gated.state, { signal: this.linked(ctx.signal), deadlineAt: this.now() + SMART_DEADLINE_MS });
       reservation.commit(0);
       ctx.assertCurrent();
       return answer.answers;
     } catch {
-      reservation.commit(0);
+      if (sent) reservation.commit(0); else reservation.release();
       return null;
+    } finally {
+      local?.release();
     }
   }
 

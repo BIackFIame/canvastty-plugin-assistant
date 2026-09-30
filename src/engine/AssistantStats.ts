@@ -19,6 +19,10 @@ export interface QualificationKey { useCase: AssistantUseCase; outcome: Qualifie
 export interface Qualification { qualified: boolean; n: number; nMin: number; errorUpperBound: number | null; eMax: number; reason: string | null }
 
 const HIGH_CONFIDENCE = 0.9;
+/** The most decisions kept in memory whatever their age; the log on disk is capped the same way (50 MB). */
+export const STATS_MAX_DECISIONS = 100_000;
+
+const labelKey = (record: LabelRecord): string => JSON.stringify([record.auditId, record.at, record.source, record.label, record.agrees]);
 
 function decisionConfidence(record: DecisionRecord): number {
   let lowest = 1;
@@ -46,7 +50,7 @@ export class AssistantStats {
   /** Idempotent: a record read back from the log after it was ingested live counts once. */
   ingest(record: LogRecord): void {
     if (record.kind === 'decision') { this.decisions.set(record.id, record); return; }
-    const key = JSON.stringify([record.auditId, record.at, record.source, record.label, record.agrees]);
+    const key = labelKey(record);
     if (this.seenLabels.has(key)) return;
     this.seenLabels.add(key);
     this.labels.push(record);
@@ -54,6 +58,27 @@ export class AssistantStats {
 
   ingestAll(records: readonly LogRecord[]): void { for (const record of records) this.ingest(record); }
   clear(): void { this.decisions.clear(); this.labels.length = 0; this.seenLabels.clear(); }
+
+  get size(): { decisions: number; labels: number } { return { decisions: this.decisions.size, labels: this.labels.length }; }
+
+  /**
+   * Memory follows the log's retention: decisions and labels older than `before` go, then the oldest decisions past
+   * `maxDecisions`, with the labels joined to them — what a restart would read back from the log is what stays.
+   */
+  prune(before: number, maxDecisions = STATS_MAX_DECISIONS): void {
+    const gone = new Set<string>();
+    for (const [id, record] of this.decisions) if (record.at < before) gone.add(id);
+    if (this.decisions.size - gone.size > maxDecisions) {
+      const rest = [...this.decisions.values()].filter(record => !gone.has(record.id)).sort((a, b) => a.at - b.at);
+      for (const record of rest.slice(0, rest.length - maxDecisions)) gone.add(record.id);
+    }
+    for (const id of gone) this.decisions.delete(id);
+    const kept = this.labels.filter(label => label.at >= before && !gone.has(label.auditId));
+    if (kept.length === this.labels.length) return;
+    this.labels.length = 0;
+    this.seenLabels.clear();
+    for (const label of kept) { this.labels.push(label); this.seenLabels.add(labelKey(label)); }
+  }
 
   /** Labels that count for a use case: non-proxy, and for command review only the person's own. */
   private counts(useCase: AssistantUseCase, label: LabelRecord): boolean {

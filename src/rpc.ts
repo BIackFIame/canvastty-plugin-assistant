@@ -2,7 +2,10 @@
 // The host sends canvastty.initialize first, then requests; the service may call the host back (storage, secrets…).
 // The transport is bounded both ways: a frame above the frame limit is skipped without being held, host calls have a
 // deadline and an in-flight cap, requests beyond the handler cap are answered busy, and on shutdown or end of input
-// the handlers still running get a short drain to answer before the process exits.
+// the handlers still running get a short drain to answer before the process exits. Output is bounded too: a frame
+// above the frame limit is never written (an answer becomes an error, a host call fails, an event is dropped), and
+// while the host is not reading (write() returned false) frames wait in order for 'drain', with the waiting events
+// and logs capped at outboundBytes by dropping the oldest of them; answers and host calls are never dropped.
 
 export interface Host {
   callHost(method: string, params?: unknown): Promise<unknown>;
@@ -19,7 +22,9 @@ export const RPC_LIMITS = Object.freeze({
   hostCalls: 64,
   activeHandlers: 64,
   /** CanvasTTY waits 2 s after canvastty.shutdown before SIGTERM. */
-  drainMs: 1_500
+  drainMs: 1_500,
+  /** Events and logs held while the host is not reading, at most. */
+  outboundBytes: 8 * 1_048_576
 });
 
 export interface ServeOptions {
@@ -28,7 +33,7 @@ export interface ServeOptions {
   onInitialize?: (params: Record<string, unknown>, host: Host) => unknown;
   /** For tests: the streams, the exit and smaller limits. */
   input?: NodeJS.ReadableStream;
-  output?: { write(text: string): unknown };
+  output?: { write(text: string): unknown; once?(event: 'drain', listener: () => void): unknown };
   exit?: (code: number) => void;
   limits?: Partial<typeof RPC_LIMITS>;
 }
@@ -41,7 +46,51 @@ export function serve({ methods, notifications = {}, onInitialize, input = proce
   let stopping = false;
   let hostGone = false;
   let onIdle: (() => void) | null = null;
-  const send = (message: Record<string, unknown>): void => { output.write(`${JSON.stringify({ jsonrpc: '2.0', ...message })}\n`); };
+  // Frames waiting for 'drain', in order; `droppable` ones (events, logs) count against outboundBytes.
+  const queue: { text: string; bytes: number; droppable: boolean }[] = [];
+  let held = 0;
+  let blocked = false;
+  let dropped = 0;
+  let onFlushed: (() => void) | null = null;
+  const write = (text: string): void => {
+    if (output.write(text) === false && typeof output.once === 'function') { blocked = true; output.once('drain', flush); }
+  };
+  function flush(): void {
+    blocked = false;
+    while (queue.length && !blocked) {
+      const frame = queue.shift()!;
+      if (frame.droppable) held -= frame.bytes;
+      write(frame.text);
+    }
+    if (blocked) return;
+    if (dropped) {
+      const count = dropped;
+      dropped = 0;
+      send({ method: 'log', params: { level: 'warn', message: `Dropped ${count} events or logs while the host was not reading.` } }, true);
+    }
+    if (!blocked && !queue.length) onFlushed?.();
+  }
+  /** Writes one frame, or holds it while the host is not reading; false when it is larger than the frame limit. */
+  const send = (message: Record<string, unknown>, droppable = false): boolean => {
+    const text = `${JSON.stringify({ jsonrpc: '2.0', ...message })}\n`;
+    const bytes = Buffer.byteLength(text);
+    // A log is cut to 500 characters, so only answers, host calls and events can outgrow a frame.
+    if (bytes > limit.frameBytes && message.method !== 'log') return false;
+    if (!blocked) { write(text); return true; }
+    if (droppable) {
+      for (let at = 0; held + bytes > limit.outboundBytes && at < queue.length;) {
+        const frame = queue[at]!;
+        if (!frame.droppable) { at++; continue; }
+        held -= frame.bytes;
+        queue.splice(at, 1);
+        dropped++;
+      }
+      if (held + bytes > limit.outboundBytes) { dropped++; return true; }
+      held += bytes;
+    }
+    queue.push({ text, bytes, droppable });
+    return true;
+  };
   const host: Host = {
     callHost: (method, params) => new Promise((resolve, reject) => {
       if (hostGone) { reject(new Error('The host connection is closed.')); return; }
@@ -49,10 +98,15 @@ export function serve({ methods, notifications = {}, onInitialize, input = proce
       const id = nextId++;
       const timer = setTimeout(() => { pending.delete(id); reject(new Error(`The host did not answer ${method} in time.`)); }, limit.hostCallMs);
       pending.set(id, { resolve, reject, timer });
-      send({ id, method, params });
+      if (!send({ id, method, params })) {
+        clearTimeout(timer); pending.delete(id);
+        reject(new Error(`The ${method} request is larger than the frame limit.`));
+      }
     }),
-    log: (level, message) => send({ method: 'log', params: { level, message: String(message).slice(0, 500) } }),
-    emit: (event, data) => send({ method: 'event', params: { event, data } })
+    log: (level, message) => { send({ method: 'log', params: { level, message: String(message).slice(0, 500) } }, true); },
+    emit: (event, data) => {
+      if (!send({ method: 'event', params: { event, data } }, true)) host.log('warn', `Dropped a ${String(event).slice(0, 80)} event larger than the frame limit.`);
+    }
   };
   const record = (value: unknown): Record<string, unknown> => value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : {};
   const errorText = (error: unknown): string => error instanceof Error ? error.message : String(error);
@@ -65,8 +119,11 @@ export function serve({ methods, notifications = {}, onInitialize, input = proce
   const stop = (): void => {
     if (stopping) return;
     stopping = true;
-    const timer = setTimeout(() => exit(0), limit.drainMs);
-    onIdle = () => { clearTimeout(timer); exit(0); };
+    let exited = false;
+    const finish = (): void => { if (exited) return; exited = true; clearTimeout(timer); exit(0); };
+    const timer = setTimeout(finish, limit.drainMs);
+    // Exits once the answers written so far have left too (still bounded by the drain timer).
+    onIdle = () => { if (blocked || queue.length) onFlushed = finish; else finish(); };
     if (active === 0) onIdle();
   };
 
@@ -98,7 +155,9 @@ export function serve({ methods, notifications = {}, onInitialize, input = proce
         if (!handler) throw Object.assign(new Error(`Unknown method: ${method}`), { code: -32601 });
         return handler(record(message.params), host);
       }).then(
-        result => send({ id: message.id, result: result ?? null }),
+        result => {
+          if (!send({ id: message.id, result: result ?? null })) send({ id: message.id, error: { code: -32000, message: 'The answer is larger than the frame limit.' } });
+        },
         (error: unknown) => send({ id: message.id, error: { code: (error as { code?: number })?.code ?? -32000, message: errorText(error).slice(0, 400) } })
       );
       return;

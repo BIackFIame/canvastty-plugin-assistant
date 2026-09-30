@@ -128,3 +128,16 @@ test('the 3 / 20 denial circuit makes a session person-only', () => {
   for (let i = 0; i < 5; i++) shown.record('u', 'block', false);
   assert.equal(shown.personOnly('u'), false);
 });
+
+test('the circuit keeps at most its session cap, dropping the least recently reviewed', async () => {
+  const circuit = new ReviewCircuit(3);
+  for (let i = 0; i < 3; i++) circuit.record('kept', 'block', true);
+  for (let n = 0; n < 2; n++) circuit.record(`s${n}`, 'allow', false);
+  circuit.record('kept', 'block', true);             // reviewed again: now the most recent
+  for (let n = 2; n < 10; n++) circuit.record(`s${n}`, 'allow', false);
+  assert.equal(circuit.size, 3);
+  const fresh = new ReviewCircuit(3);
+  for (let i = 0; i < 3; i++) fresh.record('a', 'block', true);
+  fresh.record('b', 'allow', false); fresh.record('c', 'allow', false);
+  assert.equal(fresh.personOnly('a'), true, 'a session within the cap keeps its count');
+});

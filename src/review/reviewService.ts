@@ -236,9 +236,9 @@ function tierOf(verdict: CommandReviewVerdict): RecentReview['tier'] {
 }
 
 export class ReviewService {
-  readonly tracker = new SessionWriteTracker();
+  readonly tracker = new SessionWriteTracker(MAX_SESSIONS);
   private readonly options: ReviewServiceOptions;
-  private readonly circuit = new ReviewCircuit();
+  private readonly circuit = new ReviewCircuit(MAX_SESSIONS);
   private readonly sessions = new Map<string, SessionState>();
   private readonly recentReviews: RecentReview[] = [];
   private readonly now: () => number;
@@ -253,7 +253,8 @@ export class ReviewService {
     if (!state) {
       state = { suspect: false, personRequest: null, dataClass: null, strict: false };
       this.sessions.set(sessionId, state);
-      while (this.sessions.size > MAX_SESSIONS) this.sessions.delete(this.sessions.keys().next().value!);
+      // The oldest session goes from every per-session map, not only this one.
+      while (this.sessions.size > MAX_SESSIONS) this.forget(this.sessions.keys().next().value!);
     }
     return state;
   }

@@ -341,3 +341,51 @@ test('the metadata-only variant is the last step: a local backend that may take 
     assert.deepEqual([meta.backend?.id, meta.variant], ['jev', 'metadata']);
   } finally { await f.close(); await eikos.close(); }
 });
+
+test('the statistics in memory follow the log retention instead of growing for the life of the process', async () => {
+  const DAY = 86_400_000;
+  let clock = Date.UTC(2026, 5, 10, 12);
+  const f = await engineWith({ now: () => clock });
+  try {
+    f.settings.logRetentionDays = 2;
+    f.settings.modes['task.route'] = 'shadow';
+    const map = () => ({ outcome: 'code', qualifiedOutcome: 'default' });
+    const old = await f.engine.ask(routeRequest('Old task', 'D2', { map }), ctx());
+    assert.equal(f.engine.feedback(old.auditId, 'right'), true);
+    await new Promise(resolve => setTimeout(resolve, 20));
+    assert.deepEqual(f.engine.stats.size, { decisions: 1, labels: 1 });
+    clock += 3 * DAY;
+    await f.engine.ask(routeRequest('New task', 'D2', { map }), ctx());
+    assert.deepEqual(f.engine.stats.size, { decisions: 1, labels: 0 }, 'the decision and label past retention went');
+    // Reading the log back does not bring them in again.
+    const stats = await f.engine.statistics('30d');
+    assert.equal(stats.useCases['task.route'].calls, 1);
+    assert.deepEqual(f.engine.stats.size, { decisions: 1, labels: 0 });
+  } finally { await f.close(); }
+});
+
+test('the smart verifier takes the local backend slot: one request at a time, the rest queued', async () => {
+  const { reviewRequest } = await import('./helpers/assistant-fixture.mjs');
+  const f = await engineWith({ assistant: { smart: { kind: 'ollama-chat', url: 'http://127.0.0.1:9', model: 'gemma3:12b' } } });
+  try {
+    f.settings.modes['command.review'] = 'suggest';
+    let running = 0, most = 0;
+    const releases = [];
+    f.engine.smart.ask = async () => {
+      running++; most = Math.max(most, running);
+      await new Promise(resolve => releases.push(resolve));
+      running--;
+      return { answers: { serves_request: { type: 'noul', p: 0.9 } } };
+    };
+    const decision = { mode: 'suggest', variant: 'full' };
+    const calls = [0, 1, 2].map(n => f.engine.verify(reviewRequest(`npm test ${n}`), decision, ctx({ sessionId: `s${n}` })));
+    for (let i = 0; i < 3; i++) {
+      await new Promise(resolve => setTimeout(resolve, 10));
+      assert.equal(running, 1, 'never more than one smart request in flight');
+      releases.shift()();
+    }
+    const answers = await Promise.all(calls);
+    assert.equal(answers.filter(Boolean).length, 3);
+    assert.equal(most, 1);
+  } finally { await f.close(); }
+});
